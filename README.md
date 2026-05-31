@@ -8,11 +8,11 @@ A hybrid AI assistant that runs its brain on the cloud (Vercel) and controls you
 
 ```
 ☁️ CLOUD (Vercel - Next.js)
-├── LLM Router (Groq/Gemini)
+├── LLM Router (Groq/Gemini/OpenAI/ZAI)
 ├── Agent Core (Task Classification)
 ├── Sub-Agents (Browser, Product Hunter, Code)
 ├── Memory System
-└── Web Chat UI
+└── Web Chat UI + Settings
 
 💻 DESKTOP (Python)
 ├── Cloud Connector
@@ -23,17 +23,37 @@ A hybrid AI assistant that runs its brain on the cloud (Vercel) and controls you
 └── CustomTkinter GUI
 ```
 
-## 🚀 Quick Start
+## 🚀 Vercel Deployment (Step-by-Step)
 
-### Cloud Deployment (Vercel)
+### Step 1: Import Repo
+1. Go to [vercel.com/new](https://vercel.com/new)
+2. Import `mohsinrasheed-Baga1/JARVIS-HYBRID`
 
-1. **Fork/Clone this repo**
-2. **Set Environment Variables on Vercel:**
-   - `GROQ_API_KEY` — Get from [console.groq.com](https://console.groq.com)
-   - `GEMINI_API_KEY` — Get from [makersuite.google.com](https://makersuite.google.com)
-3. **Deploy to Vercel** — Import the repo and deploy
+### Step 2: Configure Root Directory (CRITICAL!)
+1. In the import screen, click **"Configure"**
+2. Find **"Root Directory"** setting
+3. Type **`cloud`** and select it
+4. This tells Vercel that the Next.js app is inside the `cloud/` folder
 
-### Desktop Agent
+### Step 3: Deploy
+1. Click **"Deploy"**
+2. Wait for build to complete (should take ~30 seconds)
+
+### Step 4: Add API Keys
+1. Open your deployed app URL
+2. Click the **⚙️ Settings** button in the top-right
+3. Add at least one API key:
+   - 🆓 **Groq** (Free) — [console.groq.com](https://console.groq.com)
+   - 🆓 **Gemini** (Free) — [aistudio.google.com](https://aistudio.google.com/apikey)
+   - 💰 **OpenAI** — [platform.openai.com](https://platform.openai.com/api-keys)
+   - 🆓 **ZAI** — [open.bigmodel.cn](https://open.bigmodel.cn)
+4. Click **💾 Save & Close**
+
+That's it! Your JARVIS is live! 🎉
+
+> **Note:** API keys are stored in your browser's localStorage. They are never sent to our servers except to make LLM API calls on your behalf.
+
+## 🖥️ Desktop Agent
 
 ```bash
 cd desktop
@@ -44,7 +64,9 @@ python -m jarvis.main --cloud-url https://your-jarvis.vercel.app --gui
 ## 🌐 Features
 
 ### Cloud Features (Works from any browser)
-- 💬 Real-time streaming chat
+- 💬 Real-time streaming chat with 4 LLM providers
+- ⚙️ Settings panel to manage API keys from browser
+- 🔄 Auto-fallback between providers if one fails
 - 🔍 Web search & research
 - 🔥 Product trend analysis & SEO
 - 💻 Code writing, debugging & review
@@ -64,8 +86,10 @@ python -m jarvis.main --cloud-url https://your-jarvis.vercel.app --gui
 | Component | Technology |
 |-----------|-----------|
 | Cloud Framework | Next.js 16 |
-| LLM (Primary) | Groq (llama-3.3-70b-versatile) |
-| LLM (Fallback) | Google Gemini 1.5 Flash |
+| LLM Provider 1 | Groq (llama-3.3-70b-versatile) 🆓 |
+| LLM Provider 2 | Google Gemini 1.5 Flash 🆓 |
+| LLM Provider 3 | OpenAI (GPT-4o Mini) 💰 |
+| LLM Provider 4 | ZAI (GLM-4 Flash) 🆓 |
 | Desktop Language | Python 3.11+ |
 | Desktop GUI | CustomTkinter |
 | TTS (Urdu) | Piper ONNX |
@@ -85,14 +109,16 @@ JARVIS-HYBRID/
 │   │   │   ├── memory/route.ts       # Memory CRUD
 │   │   │   ├── voice/route.ts        # Voice proxy
 │   │   │   └── health/route.ts       # Health check
-│   │   ├── page.tsx                  # Web chat UI
+│   │   ├── page.tsx                  # Web chat UI + Settings
 │   │   ├── layout.tsx
 │   │   └── globals.css
 │   ├── lib/
-│   │   ├── llm-router.ts            # Groq/Gemini dual router
+│   │   ├── llm-router.ts            # 4-provider router with auto-fallback
 │   │   ├── agent-core.ts            # Task classification & routing
+│   │   ├── protocol.ts              # Shared types & constants
 │   │   ├── memory.ts                # In-memory + Vercel KV
 │   │   └── sub-agents/
+│   │       ├── base-agent.ts        # Base agent class
 │   │       ├── browser-agent.ts     # Web search
 │   │       ├── product-hunter.ts    # Product research
 │   │       └── code-agent.ts        # Code operations
@@ -109,9 +135,6 @@ JARVIS-HYBRID/
 │       │   └── upload_agent.py       # Upload automation
 │       └── voice/
 │           └── voice_engine.py       # Offline TTS/STT
-│
-└── shared/                   # 🔗 Shared protocol types
-    └── protocol.ts
 ```
 
 ## 🗣️ Bilingual Support
