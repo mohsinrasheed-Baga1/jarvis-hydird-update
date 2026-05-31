@@ -1,0 +1,30 @@
+# JARVIS Hybrid - Desktop Dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+requests>=2.31.0
+websocket-client>=1.6.0
+
+# System Control (optional - platform dependent)
+pyautogui>=0.9.54
+psutil>=5.9.0
+pyperclip>=1.8.2
+pynput>=1.7.6
+
+# Voice (optional)
+piper-tts>=1.2.0
+kokoro-onnx>=0.1.0
+faster-whisper>=1.0.0
+sounddevice>=0.4.6
+numpy>=1.24.0
+
+# GUI (optional)
+customtkinter>=5.2.0
+
+# Upload (optional)
+playwright>=1.40.0
+
+# Windows-specific (optional)
+pywin32>=306; sys_platform == 'win32'
+pycaw>=20230407; sys_platform == 'win32'
+screen_brightness_control>=0.23.0

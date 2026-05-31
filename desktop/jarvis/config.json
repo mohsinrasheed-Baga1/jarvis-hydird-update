@@ -1,0 +1,10 @@
+{
+  "cloud_url": "https://your-jarvis.vercel.app",
+  "user_id": "local_user",
+  "voice_enabled": true,
+  "language": "mixed",
+  "speed_mode": "balanced",
+  "piper_model_path": "",
+  "kokoro_model_path": "",
+  "whisper_model": "base"
+}
