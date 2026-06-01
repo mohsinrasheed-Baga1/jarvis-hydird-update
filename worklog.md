@@ -1,19 +1,32 @@
+# JARVIS-HYBRID Worklog
 
 ---
-Task ID: 1-2
+Task ID: 1
 Agent: Main Agent
-Task: Fix Urdu TTS natural voice + add story recorder + TTS provider indicator
+Task: Fix TTS voice quality and build XTTS v2 local voice cloning system
 
 Work Log:
-- Identified ROOT CAUSE: ElevenLabs voice "Matilda" doesn't work for Urdu
-- All paid TTS providers silently failed for Urdu, falling back to Google Translate (robotic)
-- Updated TTS route with 5 Hindi/Urdu voices with auto-try
-- Added story recording system with download
-- Added TTS provider indicator in UI
-- Build successful, pushed to GitHub, auto-deploy to Vercel
+- Checked current TTS route - confirmed no SSML tags present (already clean)
+- Tuned ElevenLabs voice settings for more romantic/natural tone:
+  - Romantic: stability=0.35, similarity=0.80, style=0.55 (was 0.45/0.75/0.35)
+  - All emotions updated: lower stability for more variation, higher style for expressiveness
+- Built complete XTTS v2 local voice cloning system:
+  - desktop/jarvis/voice/xtts_engine.py - Full XTTS v2 engine with:
+    - Voice cloning from 6+ seconds audio
+    - Urdu/English/Hindi + 14 languages
+    - 100% offline after model download
+    - GPU acceleration support
+    - VoiceCloningWizard for interactive setup
+    - Record from mic or clone from file
+  - desktop/setup_voice_clone.py - One-command setup wizard
+  - Updated voice_engine.py - XTTS as PRIMARY engine
+  - Updated main.py - !clone command (record/file/status/test/setup)
+  - Updated requirements.txt - Added TTS, torch, torchaudio, soundfile
+  - Updated install.sh - Voice cloning setup option
+  - Updated __init__.py - XTTS exports
 
 Stage Summary:
-- Urdu TTS now tries multiple Hindi/Urdu voices (Dhi, Maitreyi, Lily, etc.)
-- TTS provider indicator shows which engine is playing (green=natural, red=robotic)
-- Story recorder feature added (📖 button in header)
-- Deployed to Vercel
+- ElevenLabs cloud TTS settings improved for more romantic/natural voice
+- Complete XTTS v2 local voice cloning system built
+- Users can now clone their voice locally - no API needed
+- Pushed to GitHub: commit 3a75dfb
