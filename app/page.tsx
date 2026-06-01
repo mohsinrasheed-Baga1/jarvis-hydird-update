@@ -3,7 +3,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { EmotionType, JarvisMessage, APIKeys, LLMProvider } from "@/lib/protocol";
 
-// ============== TYPES ==============
 interface UploadedFile {
   name: string;
   type: string;
@@ -66,6 +65,8 @@ export default function ChatPage() {
   const recognitionRef = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesRef = useRef<JarvisMessage[]>([]);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const speakQueueRef = useRef<boolean>(false);
 
   // Sync refs
   useEffect(() => { conversationModeRef.current = conversationMode; }, [conversationMode]);
@@ -110,9 +111,30 @@ export default function ChatPage() {
   // Load voices
   useEffect(() => {
     if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.getVoices();
-      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
+      // Force load voices
+      const loadVoices = () => {
+        const v = window.speechSynthesis.getVoices();
+        console.log("[JARVIS] Available voices:", v.length, v.filter(x => x.lang.startsWith("ur") || x.lang.startsWith("ar")).map(x => `${x.name} (${x.lang})`));
+      };
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = loadVoices;
     }
+  }, []);
+
+  // ===== CANCEL ALL SPEECH =====
+  const cancelAllSpeech = useCallback(() => {
+    // Cancel browser TTS
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    // Cancel any playing audio (Google TTS)
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+    setIsSpeaking(false);
+    isSpeakingRef.current = false;
+    speakQueueRef.current = false;
   }, []);
 
   // ===== DETECT LANGUAGE =====
@@ -120,15 +142,15 @@ export default function ChatPage() {
     const urduChars = text.match(/[\u0600-\u06FF]/g);
     const urduCount = urduChars ? urduChars.length : 0;
     const ratio = text.length > 0 ? urduCount / text.length : 0;
-    if (ratio > 0.25) return "ur";
-    if (ratio > 0.05) return "mixed";
+    if (ratio > 0.2) return "ur";
+    if (ratio > 0.03) return "mixed";
     return "en";
   };
 
-  // ===== TTS — Smart Urdu/English with Google TTS fallback =====
+  // ===== TTS — Urdu/English Smart =====
   const speakText = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
-    if (!window.speechSynthesis) { onDone?.(); return; }
-    window.speechSynthesis.cancel();
+    // Cancel any existing speech first
+    cancelAllSpeech();
 
     const cleanText = text
       .replace(/```[\s\S]*?```/g, " code block ")
@@ -137,7 +159,8 @@ export default function ChatPage() {
       .replace(/\*([^*]+)\*/g, "$1")
       .replace(/#{1,6}\s/g, "")
       .replace(/https?:\/\/\S+/g, "link")
-      .replace(/[[\]()]|[*#~_]/g, "")
+      .replace(/[[\]()]/g, "")
+      .replace(/[#*_~]/g, "")
       .trim();
 
     if (!cleanText) { onDone?.(); return; }
@@ -145,54 +168,64 @@ export default function ChatPage() {
     const lang = detectLanguage(cleanText);
     const voices = window.speechSynthesis.getVoices();
 
-    // Find voices
-    const urduVoice = voices.find(v => v.lang.startsWith("ur"));
-    const englishVoice = voices.find(v =>
-      v.lang.startsWith("en") && (v.name.includes("Google") || v.name.includes("Natural"))
-    ) || voices.find(v => v.lang.startsWith("en"));
+    // Find best voice for the language
+    let selectedVoice: SpeechSynthesisVoice | null = null;
 
-    // If Urdu text and no Urdu voice available, use Google Translate TTS as fallback
-    if ((lang === "ur" || lang === "mixed") && !urduVoice) {
-      // Use Google Translate TTS for Urdu
-      const encodedText = encodeURIComponent(cleanText.substring(0, 200));
-      const audio = new Audio(`https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ur&q=${encodedText}`);
-      setIsSpeaking(true);
-      isSpeakingRef.current = true;
-      audio.onended = () => {
-        setIsSpeaking(false);
-        isSpeakingRef.current = false;
-        onDone?.();
-      };
-      audio.onerror = () => {
-        setIsSpeaking(false);
-        isSpeakingRef.current = false;
-        // Fallback: try browser TTS with any available voice
-        tryBrowserTTS(cleanText, lang, emotion, englishVoice, onDone);
-      };
-      audio.play().catch(() => {
-        setIsSpeaking(false);
-        isSpeakingRef.current = false;
-        tryBrowserTTS(cleanText, lang, emotion, englishVoice, onDone);
-      });
-      return;
+    if (lang === "ur" || lang === "mixed") {
+      // Priority 1: Urdu voice
+      const urduVoice = voices.find(v => v.lang === "ur-PK") ||
+                        voices.find(v => v.lang.startsWith("ur"));
+      
+      // Priority 2: Arabic voice (can read Urdu script partially)
+      const arabicVoice = voices.find(v => v.lang === "ar-SA" && v.name.includes("Google")) ||
+                          voices.find(v => v.lang.startsWith("ar") && v.name.includes("Google")) ||
+                          voices.find(v => v.lang.startsWith("ar"));
+
+      // Priority 3: Farsi voice (similar script)
+      const farsiVoice = voices.find(v => v.lang.startsWith("fa"));
+
+      selectedVoice = urduVoice || arabicVoice || farsiVoice || null;
+
+      // If NO Urdu/Arabic/Farsi voice at all, try Google TTS audio approach
+      if (!selectedVoice && lang === "ur") {
+        speakWithAudioTag(cleanText, emotion, onDone);
+        return;
+      }
+    } else {
+      // English: use best English voice
+      selectedVoice = voices.find(v =>
+        v.lang.startsWith("en") && v.name.includes("Google") && !v.localService
+      ) || voices.find(v =>
+        v.lang.startsWith("en-US") && v.name.includes("Google")
+      ) || voices.find(v =>
+        v.lang.startsWith("en") && v.name.includes("Google")
+      ) || voices.find(v => v.lang.startsWith("en-US")) ||
+        voices.find(v => v.lang.startsWith("en")) || null;
     }
 
-    // Use browser Speech Synthesis
-    tryBrowserTTS(cleanText, lang, emotion, urduVoice || englishVoice, onDone);
-  }, []);
+    // Speak using browser Speech Synthesis
+    speakWithBrowser(cleanText, lang, emotion, selectedVoice, onDone);
+  }, [cancelAllSpeech]);
 
-  const tryBrowserTTS = (
+  // ===== BROWSER TTS =====
+  const speakWithBrowser = (
     text: string, lang: "ur" | "en" | "mixed", emotion: EmotionType,
-    voice: SpeechSynthesisVoice | undefined, onDone?: () => void
+    voice: SpeechSynthesisVoice | null, onDone?: () => void
   ) => {
-    // Split into chunks for better playback
-    const chunks = text.match(/.{1,180}[.!?۔\n]|.{1,180}/g) || [text];
+    // Split into smaller chunks
+    const maxLen = lang === "ur" ? 120 : 180;
+    const chunks = text.match(new RegExp(`.{1,${maxLen}}[.!?۔\\n]|.{1,${maxLen}}`, "g")) || [text];
     let chunkIndex = 0;
 
+    setIsSpeaking(true);
+    isSpeakingRef.current = true;
+    speakQueueRef.current = true;
+
     const speakChunk = () => {
-      if (chunkIndex >= chunks.length) {
+      if (!speakQueueRef.current || chunkIndex >= chunks.length) {
         setIsSpeaking(false);
         isSpeakingRef.current = false;
+        speakQueueRef.current = false;
         onDone?.();
         return;
       }
@@ -201,9 +234,6 @@ export default function ChatPage() {
       if (!chunk) { chunkIndex++; speakChunk(); return; }
 
       const utterance = new SpeechSynthesisUtterance(chunk);
-      utterance.rate = emotion === "happy" || emotion === "surprised" ? 1.05 : 0.9;
-      utterance.pitch = emotion === "happy" ? 1.15 : emotion === "serious" ? 0.85 : 1.0;
-      utterance.volume = 1.0;
 
       if (voice) {
         utterance.voice = voice;
@@ -212,15 +242,57 @@ export default function ChatPage() {
         utterance.lang = (lang === "ur" || lang === "mixed") ? "ur-PK" : "en-US";
       }
 
+      utterance.rate = emotion === "happy" || emotion === "surprised" ? 1.0 : 0.88;
+      utterance.pitch = emotion === "happy" ? 1.1 : emotion === "serious" ? 0.85 : 1.0;
+      utterance.volume = 1.0;
+
       utterance.onend = () => { chunkIndex++; speakChunk(); };
       utterance.onerror = () => { chunkIndex++; speakChunk(); };
 
       window.speechSynthesis.speak(utterance);
     };
 
+    speakChunk();
+  };
+
+  // ===== AUDIO TAG TTS (Fallback for Urdu) =====
+  const speakWithAudioTag = (text: string, emotion: EmotionType, onDone?: () => void) => {
+    // Use Google Translate TTS via Audio tag (works better than fetch)
+    const maxLen = 200;
+    const textToSpeak = text.substring(0, maxLen);
+    const encoded = encodeURIComponent(textToSpeak);
+    const url = `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ur&q=${encoded}`;
+
+    const audio = new Audio(url);
+    currentAudioRef.current = audio;
+
     setIsSpeaking(true);
     isSpeakingRef.current = true;
-    speakChunk();
+    speakQueueRef.current = true;
+
+    audio.onended = () => {
+      currentAudioRef.current = null;
+      setIsSpeaking(false);
+      isSpeakingRef.current = false;
+      speakQueueRef.current = false;
+      onDone?.();
+    };
+
+    audio.onerror = () => {
+      currentAudioRef.current = null;
+      // Fallback: try browser TTS with default voice and ur-PK lang
+      const voices = window.speechSynthesis.getVoices();
+      const anyVoice = voices.find(v => v.lang.startsWith("en")) || null;
+      speakWithBrowser(text, "ur", emotion, anyVoice, onDone);
+    };
+
+    audio.play().catch(() => {
+      currentAudioRef.current = null;
+      // Fallback: browser TTS
+      const voices = window.speechSynthesis.getVoices();
+      const anyVoice = voices.find(v => v.lang.startsWith("en")) || null;
+      speakWithBrowser(text, "ur", emotion, anyVoice, onDone);
+    });
   };
 
   // ===== STT — Start Listening =====
@@ -233,9 +305,8 @@ export default function ChatPage() {
       return;
     }
 
-    window.speechSynthesis.cancel();
-    setIsSpeaking(false);
-    isSpeakingRef.current = false;
+    // Cancel any speech first
+    cancelAllSpeech();
 
     const recognition = new SpeechRecognition();
     recognition.lang = "ur-PK";
@@ -251,7 +322,7 @@ export default function ChatPage() {
       if (transcript.trim()) {
         setInput(transcript);
         if (autoSend || conversationModeRef.current) {
-          setTimeout(() => sendMessageDirect(transcript.trim()), 100);
+          setTimeout(() => sendMessageDirect(transcript.trim()), 150);
         }
       }
     };
@@ -277,7 +348,7 @@ export default function ChatPage() {
     recognition.start();
     setIsRecording(true);
     setIsListening(true);
-  }, [isRecording]);
+  }, [isRecording, cancelAllSpeech]);
 
   // ===== SEND MESSAGE =====
   const sendMessageDirect = useCallback(async (text: string, fileData?: UploadedFile) => {
@@ -292,6 +363,9 @@ export default function ChatPage() {
       setShowSettings(true);
       return;
     }
+
+    // Cancel any ongoing speech before sending new message
+    cancelAllSpeech();
 
     const userMsg: JarvisMessage = {
       id: `msg_${Date.now()}`,
@@ -308,7 +382,6 @@ export default function ChatPage() {
     setStreamingContent("");
 
     try {
-      // Detect if this is a background task
       const isTask = /^(do|task|run|execute|search|find|analyze|write|create|build|scrape|fetch|download)/i.test(text.trim());
       const taskId = isTask ? `task_${Date.now()}` : null;
 
@@ -367,7 +440,6 @@ export default function ChatPage() {
                 setMessages(prev => [...prev, assistantMsg]);
                 setStreamingContent("");
 
-                // Mark task complete
                 if (taskId) {
                   setBgTasks(prev => prev.map(t =>
                     t.id === taskId ? { ...t, status: "completed" as const, result: fullContent.substring(0, 100) } : t
@@ -381,7 +453,7 @@ export default function ChatPage() {
                       if (conversationModeRef.current && !isSpeakingRef.current) {
                         startListening(true);
                       }
-                    }, 300);
+                    }, 400);
                   }
                 });
               }
@@ -403,7 +475,7 @@ export default function ChatPage() {
       setIsLoading(false);
       isLoadingRef.current = false;
     }
-  }, [userId, apiKeys, activeProvider, speakText, startListening]);
+  }, [userId, apiKeys, activeProvider, speakText, startListening, cancelAllSpeech]);
 
   const sendMessage = useCallback((text: string) => sendMessageDirect(text, uploadedFile || undefined), [sendMessageDirect, uploadedFile]);
 
@@ -414,16 +486,18 @@ export default function ChatPage() {
     conversationModeRef.current = newMode;
 
     if (newMode) {
-      setTimeout(() => startListening(true), 200);
+      // Cancel any ongoing speech first
+      cancelAllSpeech();
+      // Start listening
+      setTimeout(() => startListening(true), 300);
     } else {
+      // Stop everything
+      cancelAllSpeech();
       recognitionRef.current?.stop();
-      window.speechSynthesis.cancel();
       setIsRecording(false);
       setIsListening(false);
-      setIsSpeaking(false);
-      isSpeakingRef.current = false;
     }
-  }, [conversationMode, startListening]);
+  }, [conversationMode, startListening, cancelAllSpeech]);
 
   // ===== MANUAL VOICE TOGGLE =====
   const toggleRecording = useCallback(() => {
@@ -433,7 +507,7 @@ export default function ChatPage() {
       setIsRecording(false);
       setIsListening(false);
     } else {
-      startListening(true); // Auto-send in manual mode too
+      startListening(true);
     }
   }, [isRecording, conversationMode, startListening]);
 
@@ -441,18 +515,12 @@ export default function ChatPage() {
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    if (file.size > 5 * 1024 * 1024) {
-      alert("File size must be under 5MB");
-      return;
-    }
+    if (file.size > 5 * 1024 * 1024) { alert("File must be under 5MB"); return; }
 
     const reader = new FileReader();
     reader.onload = (ev) => {
       setUploadedFile({
-        name: file.name,
-        type: file.type,
-        size: file.size,
+        name: file.name, type: file.type, size: file.size,
         dataUrl: ev.target?.result as string,
       });
       inputRef.current?.focus();
@@ -468,10 +536,6 @@ export default function ChatPage() {
     }
   };
 
-  const removeTask = (taskId: string) => {
-    setBgTasks(prev => prev.filter(t => t.id !== taskId));
-  };
-
   const quickActions = [
     { icon: "🎙️", text: "Voice Chat", prompt: "", isConvMode: true },
     { icon: "🔍", text: "Search the web", prompt: "Search for latest tech news" },
@@ -485,8 +549,7 @@ export default function ChatPage() {
   };
 
   const providerLabels: Record<LLMProvider, string> = {
-    groq: "Groq", gemini: "Gemini",
-    openai: "OpenAI", zai: "ZAI",
+    groq: "Groq", gemini: "Gemini", openai: "OpenAI", zai: "ZAI",
   };
 
   return (
@@ -509,20 +572,8 @@ export default function ChatPage() {
           </div>
         </div>
         <div className="header-actions">
-          <button
-            className={`btn-icon ${conversationMode ? "btn-conversation-active" : ""}`}
-            onClick={toggleConversationMode}
-            title={conversationMode ? "Stop Conversation" : "Start Voice Conversation"}
-            disabled={!hasAnyKey}
-          >
-            {conversationMode ? "🎙️" : "🎧"}
-          </button>
-          <button className="btn-icon" onClick={() => { window.speechSynthesis.cancel(); setIsSpeaking(false); isSpeakingRef.current = false; }} title="Mute">
-            🔇
-          </button>
-          <button className="btn-icon" onClick={() => setShowSettings(true)} title="Settings">
-            ⚙️
-          </button>
+          <button className="btn-icon" onClick={cancelAllSpeech} title="Mute">🔇</button>
+          <button className="btn-icon" onClick={() => setShowSettings(true)} title="Settings">⚙️</button>
         </div>
       </header>
 
@@ -579,7 +630,7 @@ export default function ChatPage() {
               <div className="welcome-alert welcome-alert-success">
                 <p style={{ fontWeight: 600 }}>🎙️ Voice Chat Available</p>
                 <p style={{ fontSize: "13px", opacity: 0.85 }}>
-                  🎧 dabao — boliye, JARVIS sunega, jawab dega, phir sunega!
+                  نیچے 🎧 dabao — boliye, JARVIS sunega, jawab dega, phir sunega!
                 </p>
               </div>
             )}
@@ -630,7 +681,7 @@ export default function ChatPage() {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input Area */}
+      {/* Input Area — CONVERSATION BUTTON IS HERE NOW */}
       <div className="chat-input-area">
         {/* File Preview */}
         {uploadedFile && (
@@ -642,26 +693,41 @@ export default function ChatPage() {
         )}
 
         <div className="chat-input-wrapper">
-          <button className="btn-icon" onClick={() => fileInputRef.current?.click()} title="Upload file for analysis">
+          {/* Upload button */}
+          <button className="btn-icon" onClick={() => fileInputRef.current?.click()} title="Upload file">
             📎
           </button>
-          <input ref={fileInputRef} type="file" hidden accept="image/*,.pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css"
+          <input ref={fileInputRef} type="file" hidden
+            accept="image/*,.pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css"
             onChange={handleFileUpload} />
 
+          {/* Conversation Mode Button — IN INPUT AREA */}
+          <button
+            className={`btn-icon ${conversationMode ? "btn-conversation-active" : ""}`}
+            onClick={toggleConversationMode}
+            title={conversationMode ? "🎙️ Stop Voice Chat" : "🎧 Start Voice Chat (Conversation Mode)"}
+            disabled={!hasAnyKey}
+          >
+            {conversationMode ? "🎙️" : "🎧"}
+          </button>
+
+          {/* Mic button */}
           <button
             className={`btn-icon btn-voice ${isRecording ? "recording" : ""}`}
             onClick={toggleRecording}
-            title={isRecording ? "Stop" : "Voice input (auto-sends)"}
+            title={isRecording ? "Stop" : "🎤 Voice input (auto-sends)"}
             disabled={conversationMode}
           >
             {isRecording ? "⏹️" : "🎤"}
           </button>
 
+          {/* Text input */}
           <textarea ref={inputRef} className="chat-input" value={input}
             onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
             placeholder={hasAnyKey ? "Type your message... / اپنا پیغام لکھیں" : "⚠️ Add API Key in Settings"}
             rows={1} style={{ minHeight: "24px" }} />
 
+          {/* Send button */}
           <button className="btn-icon btn-send" onClick={() => sendMessage(input)}
             disabled={!input.trim() || isLoading || !hasAnyKey} title="Send">➤</button>
         </div>
@@ -669,15 +735,11 @@ export default function ChatPage() {
         <div className="input-footer">
           <span>
             {hasAnyKey ? providerLabels[activeProvider] : "⚠️ No Key"}
-            {conversationMode ? " · 🎙️ Chat ON" : " · 🎧 for voice"}
+            {conversationMode ? " · 🎙️ Voice Chat ON" : " · 🎧 = voice chat"}
           </span>
-          <span>Enter · Shift+Enter new line</span>
+          <span>Enter to send</span>
         </div>
       </div>
-
-      {/* Hidden file input */}
-      <input ref={fileInputRef} type="file" hidden onChange={handleFileUpload}
-        accept="image/*,.pdf,.txt,.csv,.json,.md,.py,.js,.ts" />
 
       {/* Settings */}
       {showSettings && (
@@ -747,13 +809,10 @@ function SettingsPanel({
               </span>
               {localKeys[provider.id] && <span className="provider-saved">✅</span>}
             </div>
-            <input
-              type="password"
-              className="provider-input"
+            <input type="password" className="provider-input"
               value={localKeys[provider.id] || ""}
               onChange={(e) => setLocalKeys({ ...localKeys, [provider.id]: e.target.value })}
-              placeholder={provider.keyPlaceholder}
-            />
+              placeholder={provider.keyPlaceholder} />
             <a href={provider.getKeyUrl} target="_blank" rel="noopener noreferrer" className="provider-link">
               Get API Key →
             </a>
