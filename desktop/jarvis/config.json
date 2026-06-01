@@ -1,10 +1,42 @@
 {
-  "cloud_url": "https://your-jarvis.vercel.app",
+  "cloud_url": "https://jarvis-hybrid.vercel.app",
   "user_id": "local_user",
   "voice_enabled": true,
   "language": "mixed",
   "speed_mode": "balanced",
   "piper_model_path": "",
   "kokoro_model_path": "",
-  "whisper_model": "base"
+  "whisper_model": "base",
+  "human_identity": "Ryan",
+  "skills": [
+    "Python developer",
+    "Web development",
+    "React Next.js",
+    "Data entry",
+    "Web scraping",
+    "AI machine learning",
+    "Mobile app development"
+  ],
+  "api_keys": {
+    "groq": "",
+    "gemini": "",
+    "openai": "",
+    "zai": ""
+  },
+  "whatsapp": {
+    "auto_monitor": true,
+    "check_interval": 30,
+    "auto_reply": false,
+    "notify_new_message": true
+  },
+  "job_search": {
+    "auto_search": true,
+    "search_interval": 60,
+    "platforms": ["upwork", "freelancer", "fiverr", "google"]
+  },
+  "auto_update": {
+    "enabled": true,
+    "check_interval": 30,
+    "auto_install": true
+  }
 }
