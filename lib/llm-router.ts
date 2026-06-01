@@ -23,6 +23,24 @@ export class LLMRouter {
     this.apiKeys = { ...this.apiKeys, ...apiKeys };
   }
 
+  // Parse comma-separated keys into array
+  private _parseKeys(key: string | undefined): string[] {
+    if (!key) return [];
+    return key.split(",").map(k => k.trim()).filter(k => k.length > 0);
+  }
+
+  // Get all keys for a provider (supports comma-separated multi-keys)
+  private _getProviderKeys(provider: LLMProvider): string[] {
+    const key = this.apiKeys[provider];
+    const envKey = process.env[`GROQ_API_KEY`] && provider === "groq" ? process.env.GROQ_API_KEY :
+                   process.env[`GEMINI_API_KEY`] && provider === "gemini" ? process.env.GEMINI_API_KEY :
+                   process.env[`OPENAI_API_KEY`] && provider === "openai" ? process.env.OPENAI_API_KEY :
+                   process.env[`ZAI_API_KEY`] && provider === "zai" ? process.env.ZAI_API_KEY : "";
+    const allKeys = [...this._parseKeys(key), ...this._parseKeys(envKey)];
+    // Remove duplicates
+    return [...new Set(allKeys)];
+  }
+
   // ============== CHAT ==============
 
   async chat(
@@ -32,34 +50,57 @@ export class LLMRouter {
     const fullConfig = { ...DEFAULT_LLM_CONFIG, ...config };
     const provider = fullConfig.provider || this._selectProvider();
 
-    // Try primary provider
-    try {
-      return await this._chatWithProvider(provider, messages, fullConfig);
-    } catch (primaryError) {
-      console.error(`[LLM Router] ${provider} failed:`, primaryError);
+    // MULTI-KEY: Try each key for the primary provider first
+    const providerKeys = this._getProviderKeys(provider);
+    for (const key of providerKeys) {
+      try {
+        const singleKeyConfig = { ...this.apiKeys, [provider]: key };
+        const router = new LLMRouter(singleKeyConfig);
+        return await router._chatWithProvider(provider, messages, fullConfig);
+      } catch (err: any) {
+        const isRateLimit = err?.status === 429 || err?.statusCode === 429 ||
+          String(err?.message || "").includes("rate") || String(err?.message || "").includes("limit") ||
+          String(err?.message || "").includes("quota");
+        console.warn(`[LLM Router] ${provider} key ${key.substring(0, 8)}... failed: ${err?.message?.substring(0, 80)}`);
+        if (isRateLimit && providerKeys.indexOf(key) < providerKeys.length - 1) {
+          console.log(`[LLM Router] Rate limited, trying next key...`);
+          continue; // Try next key
+        }
+        break; // Non-rate-limit error or last key, fall through to other providers
+      }
+    }
 
-      // Try fallback providers in order
-      const allProviders: LLMProvider[] = ["groq", "gemini", "openai", "zai"];
-      const fallbacks = allProviders.filter(
-        (p) => p !== provider && this._hasKey(p as LLMProvider)
-      );
+    // Try fallback providers
+    const allProviders: LLMProvider[] = ["groq", "gemini", "openai", "zai"];
+    const fallbacks = allProviders.filter(
+      (p) => p !== provider && this._hasKey(p as LLMProvider)
+    );
 
-      for (const fallback of fallbacks) {
+    for (const fallback of fallbacks) {
+      const fallbackKeys = this._getProviderKeys(fallback as LLMProvider);
+      for (const key of fallbackKeys) {
         try {
-          console.log(`[LLM Router] Trying fallback: ${fallback}`);
-          return await this._chatWithProvider(fallback as LLMProvider, messages, {
+          console.log(`[LLM Router] Trying fallback: ${fallback} key ${key.substring(0, 8)}...`);
+          const singleKeyConfig = { ...this.apiKeys, [fallback]: key };
+          const router = new LLMRouter(singleKeyConfig);
+          return await router._chatWithProvider(fallback as LLMProvider, messages, {
             ...fullConfig,
             provider: fallback,
           });
-        } catch (fbError) {
-          console.error(`[LLM Router] ${fallback} also failed:`, fbError);
+        } catch (fbError: any) {
+          const isRateLimit = fbError?.status === 429 || fbError?.statusCode === 429;
+          if (isRateLimit && fallbackKeys.indexOf(key) < fallbackKeys.length - 1) {
+            continue;
+          }
+          console.error(`[LLM Router] ${fallback} also failed:`, fbError?.message?.substring(0, 80));
+          break;
         }
       }
-
-      throw new Error(
-        "All LLM providers failed. Please add at least one API key in Settings."
-      );
     }
+
+    throw new Error(
+      "All LLM providers failed. Please add more API keys in Settings."
+    );
   }
 
   // ============== STREAMING ==============

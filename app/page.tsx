@@ -311,14 +311,15 @@ export default function ChatPage() {
     speakChunk();
   }, [speakUrduFallback]);
 
-  // ===== SERVER-SIDE URDU TTS (No CORS issues!) =====
-  const speakUrduServer = useCallback(async (text: string, emotion: EmotionType, onDone?: () => void) => {
+  // ===== SERVER-SIDE TTS — CORRECT LANGUAGE (No CORS issues!) =====
+  const speakServerTTS = useCallback(async (text: string, lang: "ur" | "en" | "mixed", emotion: EmotionType, onDone?: () => void) => {
     setIsSpeaking(true);
     isSpeakingRef.current = true;
     speakQueueRef.current = true;
 
     try {
-      const chunks = splitUrduChunks(text);
+      const chunks = (lang === "ur" || lang === "mixed") ? splitUrduChunks(text) :
+        text.match(new RegExp(`.{1,300}[.!?\\n]|.{1,300}`, "g")) || [text];
       let chunkIndex = 0;
 
       const playChunk = async () => {
@@ -334,23 +335,27 @@ export default function ChatPage() {
         if (!chunk) { chunkIndex++; await playChunk(); return; }
 
         try {
-          // Call OUR server-side TTS endpoint (no CORS!)
-          // Pass all TTS keys for natural voice priority
+          // Get ALL TTS keys — support comma-separated multi-keys
           const elevenlabsKey = localStorage.getItem("jarvis_elevenlabs_key") || "";
           const sarvamKey = localStorage.getItem("jarvis_sarvam_key") || "";
           const openaiKey = localStorage.getItem("jarvis_openai_tts_key") ||
             (localStorage.getItem("jarvis_api_keys") ?
               JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") || "";
+
+          // Merge all OpenAI keys (LLM key + dedicated TTS key)
+          const allOpenAIKeys = [openaiKey, localStorage.getItem("jarvis_openai_extra_keys") || ""]
+            .join(",").split(",").map(k => k.trim()).filter(k => k.length > 0).join(",");
+
           const res = await fetch("/api/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               text: chunk.substring(0, 5000),
-              lang: "ur",
+              lang: (lang === "ur" || lang === "mixed") ? "ur" : "en",  // CRITICAL: correct language!
               emotion: emotion,
               elevenlabsKey: elevenlabsKey || undefined,
               sarvamKey: sarvamKey || undefined,
-              openaiKey: openaiKey || undefined,
+              openaiKey: allOpenAIKeys || undefined,
             }),
           });
 
@@ -380,14 +385,18 @@ export default function ChatPage() {
               return;
             }
           }
-          // Server TTS failed for this chunk, skip to next
-          console.warn("[JARVIS] Server TTS chunk failed, skipping");
+          // Server TTS failed for this chunk, try browser TTS as fallback
+          console.warn(`[JARVIS] Server TTS chunk failed (provider: ${res.headers.get("X-TTS-Provider") || "unknown"}, status: ${res.status})`);
           chunkIndex++;
           await playChunk();
         } catch (err) {
           console.warn("[JARVIS] Server TTS error:", err);
           // Fall back to browser TTS
-          speakUrduCloud(text, emotion, onDone);
+          if (lang === "ur" || lang === "mixed") {
+            speakUrduCloud(text, emotion, onDone);
+          } else {
+            speakWithBrowser(text, "en", emotion, null, onDone);
+          }
         }
       };
 
@@ -396,10 +405,14 @@ export default function ChatPage() {
       setIsSpeaking(false);
       isSpeakingRef.current = false;
       speakQueueRef.current = false;
-      // Fall back to browser Urdu TTS
-      speakUrduCloud(text, emotion, onDone);
+      // Fall back to browser TTS
+      if (lang === "ur" || lang === "mixed") {
+        speakUrduCloud(text, emotion, onDone);
+      } else {
+        speakWithBrowser(text, "en", emotion, null, onDone);
+      }
     }
-  }, [speakUrduCloud]);
+  }, [speakUrduCloud, speakWithBrowser]);
 
   // ===== TTS — Urdu/English Smart =====
   const speakText = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
@@ -416,18 +429,22 @@ export default function ChatPage() {
       .trim();
     if (!cleanText) { onDone?.(); return; }
     const lang = detectLanguage(cleanText);
+
+    // CRITICAL FIX: Pass correct language to server TTS!
+    // Before, ALL text was sent as lang="ur" which caused wrong voice selection
     if (lang === "ur" || lang === "mixed") {
-      // PRIMARY: Server-side TTS (no CORS issues!)
-      speakUrduServer(cleanText, emotion, onDone);
+      speakServerTTS(cleanText, "ur", emotion, onDone);
     } else {
-      // English: Try OpenAI TTS via server first (if key available), then browser
-      const openaiKey = localStorage.getItem("jarvis_openai_tts_key") ||
+      // English — use server TTS with lang="en" for correct voice
+      const hasAnyTTSKey = localStorage.getItem("jarvis_elevenlabs_key") ||
+        localStorage.getItem("jarvis_sarvam_key") ||
+        localStorage.getItem("jarvis_openai_tts_key") ||
         (localStorage.getItem("jarvis_api_keys") ?
-          JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") || "";
-      if (openaiKey) {
-        // Use server-side OpenAI TTS for natural English voice too
-        speakUrduServer(cleanText, emotion, onDone);
+          JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "");
+      if (hasAnyTTSKey) {
+        speakServerTTS(cleanText, "en", emotion, onDone);
       } else {
+        // No TTS keys — use browser TTS for English
         const voices = window.speechSynthesis.getVoices();
         const selectedVoice = voices.find(v =>
           v.lang.startsWith("en") && v.name.includes("Google") && !v.localService
@@ -440,7 +457,7 @@ export default function ChatPage() {
         speakWithBrowser(cleanText, "en", emotion, selectedVoice, onDone);
       }
     }
-  }, [cancelAllSpeech, speakUrduServer]);
+  }, [cancelAllSpeech, speakServerTTS]);
 
   // ===== STT — Start Listening (NEVER auto-closes mic!) =====
   const startListening = useCallback((autoSend: boolean = false) => {
@@ -1012,7 +1029,7 @@ function SettingsPanel({
       <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
         <h2>⚙️ API Settings</h2>
         <p style={{ color: "var(--text-muted)", fontSize: "13px", marginBottom: "20px" }}>
-          کم از کم ایک API Key ڈالیں۔ Keys browser میں محفوظ رہیں گی۔
+          کم از کم ایک API Key ڈالیں۔ ایک سے زیادہ keys ڈالنے کے لیے comma (,) سے الگ کریں — لیمٹ ختم ہو تو اگلی key خودکار چلے گی!
         </p>
 
         <label style={{ fontWeight: 600, marginBottom: "8px", display: "block" }}>🎯 Active Provider</label>
@@ -1039,12 +1056,12 @@ function SettingsPanel({
               <span className="provider-name">
                 {provider.free ? "🆓" : "💰"} {provider.name}
               </span>
-              {localKeys[provider.id] && <span className="provider-saved">✅</span>}
+              {localKeys[provider.id] && <span className="provider-saved">✅ {(localKeys[provider.id] || "").split(",").filter((k:string)=>k.trim()).length} key(s)</span>}
             </div>
             <input type="password" className="provider-input"
               value={localKeys[provider.id] || ""}
               onChange={(e) => setLocalKeys({ ...localKeys, [provider.id]: e.target.value })}
-              placeholder={provider.keyPlaceholder} />
+              placeholder={localKeys[provider.id] ? provider.keyPlaceholder + " (comma سے زیادہ keys ڈالیں)" : provider.keyPlaceholder} />
             <a href={provider.getKeyUrl} target="_blank" rel="noopener noreferrer" className="provider-link">
               Get API Key →
             </a>
@@ -1070,7 +1087,7 @@ function SettingsPanel({
             <input type="password" className="provider-input"
               value={elevenlabsKey}
               onChange={(e) => setElevenlabsKey(e.target.value)}
-              placeholder="xi_... (free tier: 10,000 chars/month)" />
+              placeholder="xi_... (ایک سے زیادہ keys comma سے الگ کریں)" />
             <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer" className="provider-link">
               🆓 Free API Key لیں →
             </a>
@@ -1088,7 +1105,7 @@ function SettingsPanel({
             <input type="password" className="provider-input"
               value={sarvamKey}
               onChange={(e) => setSarvamKey(e.target.value)}
-              placeholder="Sarvam API Key" />
+              placeholder="Sarvam API Key (ایک سے زیادہ comma سے الگ)" />
             <a href="https://sarvam.ai" target="_blank" rel="noopener noreferrer" className="provider-link">
               🆓 Sarvam AI سے Key لیں →
             </a>
