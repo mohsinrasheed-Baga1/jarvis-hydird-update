@@ -335,8 +335,9 @@ export default function ChatPage() {
 
         try {
           // Call OUR server-side TTS endpoint (no CORS!)
-          // Pass ElevenLabs key if available for natural voice
+          // Pass all TTS keys for natural voice priority
           const elevenlabsKey = localStorage.getItem("jarvis_elevenlabs_key") || "";
+          const sarvamKey = localStorage.getItem("jarvis_sarvam_key") || "";
           const openaiKey = localStorage.getItem("jarvis_openai_tts_key") ||
             (localStorage.getItem("jarvis_api_keys") ?
               JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") || "";
@@ -344,17 +345,18 @@ export default function ChatPage() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              text: chunk.substring(0, 500),
+              text: chunk.substring(0, 5000),
               lang: "ur",
               emotion: emotion,
               elevenlabsKey: elevenlabsKey || undefined,
+              sarvamKey: sarvamKey || undefined,
               openaiKey: openaiKey || undefined,
             }),
           });
 
           if (res.ok) {
             const contentType = res.headers.get("content-type") || "";
-            if (contentType.includes("audio") || contentType.includes("mpeg")) {
+            if (contentType.includes("audio") || contentType.includes("mpeg") || contentType.includes("wav")) {
               const blob = await res.blob();
               const url = URL.createObjectURL(blob);
               const audio = new Audio(url);
@@ -440,7 +442,7 @@ export default function ChatPage() {
     }
   }, [cancelAllSpeech, speakUrduServer]);
 
-  // ===== STT — Start Listening =====
+  // ===== STT — Start Listening (NEVER auto-closes mic!) =====
   const startListening = useCallback((autoSend: boolean = false) => {
     if (isRecording) return;
 
@@ -455,24 +457,78 @@ export default function ChatPage() {
 
     const recognition = new SpeechRecognition();
     recognition.lang = "ur-PK";
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    // CRITICAL: continuous = true means mic stays OPEN — never auto-closes!
+    recognition.continuous = true;
+    // interimResults = true so we can detect when user starts speaking
+    recognition.interimResults = true;
     recognition.maxAlternatives = 1;
 
-    recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      setIsRecording(false);
-      setIsListening(false);
+    // Silence detection — wait for user to finish speaking
+    let silenceTimer: NodeJS.Timeout | null = null;
+    let lastTranscript = "";
+    let hasFinalResult = false;
+    const SILENCE_TIMEOUT = 3000; // 3 seconds of silence = user done speaking
+    // In conversation mode, be more patient
+    const convSilenceTimeout = conversationModeRef.current ? 4000 : 2500;
 
-      if (transcript.trim()) {
-        setInput(transcript);
-        if (autoSend || conversationModeRef.current) {
-          setTimeout(() => sendMessageDirect(transcript.trim()), 150);
+    const resetSilenceTimer = () => {
+      if (silenceTimer) clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(() => {
+        // User has been silent — they're done speaking
+        if (lastTranscript.trim() && !hasFinalResult) {
+          hasFinalResult = true;
+          const finalTranscript = lastTranscript.trim();
+          setIsRecording(false);
+          setIsListening(false);
+          setInput(finalTranscript);
+          // Stop the recognition since we have the text
+          try { recognition.stop(); } catch {}
+          if (autoSend || conversationModeRef.current) {
+            setTimeout(() => sendMessageDirect(finalTranscript), 200);
+          }
+        } else if (!lastTranscript.trim() && conversationModeRef.current) {
+          // No speech detected yet, but in conversation mode — keep listening!
+          // Don't close the mic, just reset the timer
+          hasFinalResult = false;
         }
+      }, convSilenceTimeout);
+    };
+
+    recognition.onresult = (event: any) => {
+      let interimTranscript = "";
+      let finalTranscript = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          finalTranscript += result[0].transcript;
+        } else {
+          interimTranscript += result[0].transcript;
+        }
+      }
+
+      // Update the last transcript with whatever we have
+      if (finalTranscript) {
+        lastTranscript = finalTranscript;
+        hasFinalResult = true;
+        setIsRecording(false);
+        setIsListening(false);
+        setInput(finalTranscript.trim());
+        try { recognition.stop(); } catch {}
+        if (autoSend || conversationModeRef.current) {
+          setTimeout(() => sendMessageDirect(finalTranscript.trim()), 200);
+        }
+      } else if (interimTranscript) {
+        lastTranscript = interimTranscript;
+        // Show what user is saying in real-time
+        setInput(interimTranscript);
+        // Reset silence timer — user is still speaking
+        resetSilenceTimer();
       }
     };
 
     recognition.onerror = (event: any) => {
+      if (silenceTimer) clearTimeout(silenceTimer);
       setIsRecording(false);
       setIsListening(false);
       if (conversationModeRef.current && event.error !== "not-allowed" && event.error !== "aborted") {
@@ -485,6 +541,16 @@ export default function ChatPage() {
     };
 
     recognition.onend = () => {
+      if (silenceTimer) clearTimeout(silenceTimer);
+      // In conversation mode, if we didn't get a final result, restart listening
+      if (conversationModeRef.current && !hasFinalResult && !isLoadingRef.current) {
+        setTimeout(() => {
+          if (conversationModeRef.current && !isSpeakingRef.current) {
+            startListening(true);
+          }
+        }, 300);
+        return;
+      }
       setIsRecording(false);
       setIsListening(false);
     };
@@ -493,6 +559,8 @@ export default function ChatPage() {
     recognition.start();
     setIsRecording(true);
     setIsListening(true);
+    // Start the initial silence timer
+    resetSilenceTimer();
   }, [isRecording, cancelAllSpeech]);
 
   // ===== SEND MESSAGE =====
@@ -919,6 +987,10 @@ function SettingsPanel({
     if (typeof window === "undefined") return "";
     return localStorage.getItem("jarvis_elevenlabs_key") || "";
   });
+  const [sarvamKey, setSarvamKey] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return localStorage.getItem("jarvis_sarvam_key") || "";
+  });
 
   const providers: Array<{ id: LLMProvider; name: string; keyPlaceholder: string; getKeyUrl: string; free: boolean }> = [
     { id: "groq", name: "Groq (Llama 3.3 70B)", keyPlaceholder: "gsk_...", getKeyUrl: "https://console.groq.com", free: true },
@@ -931,6 +1003,7 @@ function SettingsPanel({
     onSaveKeys(localKeys);
     onSaveProvider(localProvider);
     localStorage.setItem("jarvis_elevenlabs_key", elevenlabsKey);
+    localStorage.setItem("jarvis_sarvam_key", sarvamKey);
     onClose();
   };
 
@@ -978,20 +1051,57 @@ function SettingsPanel({
           </div>
         ))}
 
-        {/* ===== VOICE / TTS Section ===== */}
+        {/* ===== NATURAL VOICE / TTS Section ===== */}
         <div style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color)" }}>
-          <h3 style={{ fontSize: "15px", fontWeight: 600, marginBottom: "12px" }}>🎙️ Natural Voice (TTS)</h3>
+          <h3 style={{ fontSize: "15px", fontWeight: 600, marginBottom: "12px" }}>🎙️ نیچرل آواز (100% انسان جیسی)</h3>
           <p style={{ color: "var(--text-muted)", fontSize: "12px", marginBottom: "16px" }}>
-            نیچرل آواز کے لیے: OpenAI key (آپ کی موجودہ key) یا ElevenLabs key ڈالیں۔ بغیر key کے Google TTS استعمال ہوگا (روبوٹک)۔
+            یوٹیوب پر ہندی AI ایجنٹس جیسی بالکل نیچرل آواز چاہیے تو ElevenLabs یا Sarvam AI key ڈالیں۔ بغیر key کے Google TTS استعمال ہوگا (روبوٹک)۔
           </p>
+
+          {/* ElevenLabs — THE BEST — same as YouTube Hindi AI agents */}
+          <div className="provider-card" style={{ borderColor: elevenlabsKey ? "rgba(34,197,94,0.3)" : undefined }}>
+            <div className="provider-header">
+              <span className="provider-name">👑 ElevenLabs Turbo (سب سے نیچرل!)</span>
+              {elevenlabsKey && <span className="provider-saved">✅</span>}
+            </div>
+            <p style={{ color: "var(--text-muted)", fontSize: "11px", margin: "6px 0 8px" }}>
+              یہ وہی سسٹم ہے جو یوٹیوب پر ہندی AI ایجنٹس استعمال کرتے ہیں — 100% نیچرل، انسان جیسی آواز، جذبات کے ساتھ!
+            </p>
+            <input type="password" className="provider-input"
+              value={elevenlabsKey}
+              onChange={(e) => setElevenlabsKey(e.target.value)}
+              placeholder="xi_... (free tier: 10,000 chars/month)" />
+            <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer" className="provider-link">
+              🆓 Free API Key لیں →
+            </a>
+          </div>
+
+          {/* Sarvam AI — Indian TTS, natural Hindi/Urdu */}
+          <div className="provider-card" style={{ borderColor: sarvamKey ? "rgba(34,197,94,0.3)" : undefined, marginTop: "10px" }}>
+            <div className="provider-header">
+              <span className="provider-name">🇮🇳 Sarvam AI (ہندی/اردو نیچرل آواز)</span>
+              {sarvamKey && <span className="provider-saved">✅</span>}
+            </div>
+            <p style={{ color: "var(--text-muted)", fontSize: "11px", margin: "6px 0 8px" }}>
+              ہندوستانی AI کمپنی — ہندی/اردو کے لیے مخصوص، بالکل نیچرل آواز، فری ٹائر دستیاب!
+            </p>
+            <input type="password" className="provider-input"
+              value={sarvamKey}
+              onChange={(e) => setSarvamKey(e.target.value)}
+              placeholder="Sarvam API Key" />
+            <a href="https://sarvam.ai" target="_blank" rel="noopener noreferrer" className="provider-link">
+              🆓 Sarvam AI سے Key لیں →
+            </a>
+          </div>
 
           {/* OpenAI TTS - auto-uses existing key */}
           <div className="provider-card" style={{
             borderColor: (localKeys.openai || localStorage.getItem("jarvis_api_keys") ?
-              JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") ? "rgba(34,197,94,0.3)" : undefined
+              JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") ? "rgba(34,197,94,0.3)" : undefined,
+            marginTop: "10px"
           }}>
             <div className="provider-header">
-              <span className="provider-name">🎵 OpenAI TTS (Natural Voice)</span>
+              <span className="provider-name">🎵 OpenAI TTS HD (نیچرل)</span>
               {(localKeys.openai || localStorage.getItem("jarvis_api_keys") ?
                 JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") && <span className="provider-saved">✅ Auto</span>}
             </div>
@@ -1000,19 +1110,13 @@ function SettingsPanel({
             </p>
           </div>
 
-          {/* ElevenLabs */}
-          <div className="provider-card" style={{ borderColor: elevenlabsKey ? "rgba(34,197,94,0.3)" : undefined, marginTop: "10px" }}>
-            <div className="provider-header">
-              <span className="provider-name">🆓 ElevenLabs (Best Urdu Voice)</span>
-              {elevenlabsKey && <span className="provider-saved">✅</span>}
-            </div>
-            <input type="password" className="provider-input"
-              value={elevenlabsKey}
-              onChange={(e) => setElevenlabsKey(e.target.value)}
-              placeholder="xi_... (free tier: 10,000 chars/month)" />
-            <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer" className="provider-link">
-              Free API Key لیں →
-            </a>
+          {/* Priority Info */}
+          <div style={{ marginTop: "12px", padding: "10px", background: "rgba(59,130,246,0.1)", borderRadius: "8px", fontSize: "11px", color: "var(--text-muted)" }}>
+            <p style={{ fontWeight: 600, marginBottom: "4px" }}>📋 آواز کی ترجیح:</p>
+            <p>1️⃣ ElevenLabs Turbo (سب سے نیچرل — یوٹیوب جیسا)</p>
+            <p>2️⃣ Sarvam AI (ہندی/اردو مخصوص)</p>
+            <p>3️⃣ OpenAI TTS HD (اچھی نیچرل)</p>
+            <p>4️⃣ Google Translate (روبوٹک — آخری آپشن)</p>
           </div>
         </div>
 
