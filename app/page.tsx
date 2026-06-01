@@ -136,22 +136,184 @@ export default function ChatPage() {
     isSpeakingRef.current = false;
     speakQueueRef.current = false;
   }, []);
-
+  
   // ===== DETECT LANGUAGE =====
   const detectLanguage = (text: string): "ur" | "en" | "mixed" => {
     const urduChars = text.match(/[\u0600-\u06FF]/g);
     const urduCount = urduChars ? urduChars.length : 0;
     const ratio = text.length > 0 ? urduCount / text.length : 0;
-    if (ratio > 0.2) return "ur";
+    if (ratio > 0.15) return "ur";
     if (ratio > 0.03) return "mixed";
     return "en";
   };
 
+  // ===== SPLIT URDU TEXT INTO SPEAKABLE CHUNKS =====
+  const splitUrduChunks = (text: string): string[] => {
+    const maxLen = 150;
+    const raw = text.split(/(?<=[.!?۔\n])\s*/);
+    const chunks: string[] = [];
+    let current = "";
+    for (const segment of raw) {
+      if ((current + " " + segment).length > maxLen && current.length > 0) {
+        chunks.push(current.trim());
+        current = segment;
+      } else {
+        current = current ? current + " " + segment : segment;
+      }
+    }
+    if (current.trim()) chunks.push(current.trim());
+    return chunks.length > 0 ? chunks : [text];
+  };
+
+  // ===== BROWSER TTS =====
+  const speakWithBrowser = (
+    text: string, lang: "ur" | "en" | "mixed", emotion: EmotionType,
+    voice: SpeechSynthesisVoice | null, onDone?: () => void
+  ) => {
+    const chunks = lang === "ur" ? splitUrduChunks(text) :
+      text.match(new RegExp(`.{1,180}[.!?\\n]|.{1,180}`, "g")) || [text];
+    let chunkIndex = 0;
+    setIsSpeaking(true);
+    isSpeakingRef.current = true;
+    speakQueueRef.current = true;
+    const speakChunk = () => {
+      if (!speakQueueRef.current || chunkIndex >= chunks.length) {
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        speakQueueRef.current = false;
+        onDone?.();
+        return;
+      }
+      const chunk = chunks[chunkIndex].trim();
+      if (!chunk) { chunkIndex++; speakChunk(); return; }
+      const utterance = new SpeechSynthesisUtterance(chunk);
+      if (voice) {
+        utterance.voice = voice;
+        utterance.lang = voice.lang;
+      } else {
+        utterance.lang = (lang === "ur" || lang === "mixed") ? "ur-PK" : "en-US";
+      }
+      utterance.rate = emotion === "happy" || emotion === "surprised" ? 1.0 : 0.88;
+      utterance.pitch = emotion === "happy" ? 1.1 : emotion === "serious" ? 0.85 : 1.0;
+      utterance.volume = 1.0;
+      utterance.onend = () => { chunkIndex++; speakChunk(); };
+      utterance.onerror = () => { chunkIndex++; speakChunk(); };
+      window.speechSynthesis.speak(utterance);
+    };
+    speakChunk();
+  };
+
+  // ===== GOOGLE TRANSLATE TTS (Last resort) =====
+  const speakWithGoogleTTS = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
+    console.log("[JARVIS] Trying Google Translate TTS...");
+    const chunks = splitUrduChunks(text);
+    let chunkIndex = 0;
+    setIsSpeaking(true);
+    isSpeakingRef.current = true;
+    speakQueueRef.current = true;
+    const playChunk = () => {
+      if (!speakQueueRef.current || chunkIndex >= chunks.length) {
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        speakQueueRef.current = false;
+        onDone?.();
+        return;
+      }
+      const chunk = chunks[chunkIndex].trim();
+      if (!chunk) { chunkIndex++; playChunk(); return; }
+      const encoded = encodeURIComponent(chunk.substring(0, 180));
+      const url = `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ur&q=${encoded}`;
+      const audio = new Audio();
+      audio.crossOrigin = "anonymous";
+      audio.src = url;
+      currentAudioRef.current = audio;
+      audio.onended = () => {
+        currentAudioRef.current = null;
+        chunkIndex++;
+        playChunk();
+      };
+      audio.onerror = () => {
+        console.warn("[JARVIS] Google TTS failed, final fallback");
+        currentAudioRef.current = null;
+        speakWithBrowser(text, "ur", emotion, null, onDone);
+      };
+      audio.play().catch(() => {
+        console.warn("[JARVIS] Google TTS play() failed");
+        currentAudioRef.current = null;
+        speakWithBrowser(text, "ur", emotion, null, onDone);
+      });
+    };
+    playChunk();
+  }, []);
+
+  // ===== URDU FALLBACK =====
+  const speakUrduFallback = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
+    console.log("[JARVIS] Trying Urdu fallback...");
+    const voices = window.speechSynthesis.getVoices();
+    const arabicVoice = voices.find(v => v.lang === "ar-SA" && v.name.includes("Google")) ||
+                        voices.find(v => v.lang.startsWith("ar") && v.name.includes("Google")) ||
+                        voices.find(v => v.lang.startsWith("ar"));
+    if (arabicVoice) {
+      console.log("[JARVIS] Using Arabic voice:", arabicVoice.name);
+      speakWithBrowser(text, "ur", emotion, arabicVoice, onDone);
+      return;
+    }
+    speakWithGoogleTTS(text, emotion, onDone);
+  }, [speakWithGoogleTTS]);
+
+  // ===== URDU CLOUD TTS (Chrome's built-in cloud Urdu voice) =====
+  const speakUrduCloud = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
+    const chunks = splitUrduChunks(text);
+    let chunkIndex = 0;
+    let failed = false;
+    setIsSpeaking(true);
+    isSpeakingRef.current = true;
+    speakQueueRef.current = true;
+    const speakChunk = () => {
+      if (!speakQueueRef.current || chunkIndex >= chunks.length || failed) {
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        speakQueueRef.current = false;
+        onDone?.();
+        return;
+      }
+      const chunk = chunks[chunkIndex].trim();
+      if (!chunk) { chunkIndex++; speakChunk(); return; }
+      const utterance = new SpeechSynthesisUtterance(chunk);
+      // CRITICAL: Set lang to ur-PK but do NOT set voice property
+      // This allows Chrome to use its cloud Urdu voice automatically
+      utterance.lang = "ur-PK";
+      utterance.rate = emotion === "happy" || emotion === "surprised" ? 1.0 : 0.85;
+      utterance.pitch = emotion === "happy" ? 1.1 : emotion === "serious" ? 0.85 : 1.0;
+      utterance.volume = 1.0;
+      const timeout = setTimeout(() => {
+        if (!failed && !window.speechSynthesis.speaking && !window.speechSynthesis.pending) {
+          failed = true;
+          window.speechSynthesis.cancel();
+          speakUrduFallback(text, emotion, onDone);
+        }
+      }, 3500);
+      utterance.onend = () => {
+        clearTimeout(timeout);
+        chunkIndex++;
+        speakChunk();
+      };
+      utterance.onerror = (event) => {
+        clearTimeout(timeout);
+        console.warn("[JARVIS] Urdu cloud TTS error:", event.error);
+        if (!failed) {
+          failed = true;
+          speakUrduFallback(text, emotion, onDone);
+        }
+      };
+      window.speechSynthesis.speak(utterance);
+    };
+    speakChunk();
+  }, [speakUrduFallback]);
+
   // ===== TTS — Urdu/English Smart =====
   const speakText = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
-    // Cancel any existing speech first
     cancelAllSpeech();
-
     const cleanText = text
       .replace(/```[\s\S]*?```/g, " code block ")
       .replace(/`[^`]+`/g, "")
@@ -162,38 +324,13 @@ export default function ChatPage() {
       .replace(/[[\]()]/g, "")
       .replace(/[#*_~]/g, "")
       .trim();
-
     if (!cleanText) { onDone?.(); return; }
-
     const lang = detectLanguage(cleanText);
-    const voices = window.speechSynthesis.getVoices();
-
-    // Find best voice for the language
-    let selectedVoice: SpeechSynthesisVoice | null = null;
-
     if (lang === "ur" || lang === "mixed") {
-      // Priority 1: Urdu voice
-      const urduVoice = voices.find(v => v.lang === "ur-PK") ||
-                        voices.find(v => v.lang.startsWith("ur"));
-      
-      // Priority 2: Arabic voice (can read Urdu script partially)
-      const arabicVoice = voices.find(v => v.lang === "ar-SA" && v.name.includes("Google")) ||
-                          voices.find(v => v.lang.startsWith("ar") && v.name.includes("Google")) ||
-                          voices.find(v => v.lang.startsWith("ar"));
-
-      // Priority 3: Farsi voice (similar script)
-      const farsiVoice = voices.find(v => v.lang.startsWith("fa"));
-
-      selectedVoice = urduVoice || arabicVoice || farsiVoice || null;
-
-      // If NO Urdu/Arabic/Farsi voice at all, try Google TTS audio approach
-      if (!selectedVoice && lang === "ur") {
-        speakWithAudioTag(cleanText, emotion, onDone);
-        return;
-      }
+      speakUrduCloud(cleanText, emotion, onDone);
     } else {
-      // English: use best English voice
-      selectedVoice = voices.find(v =>
+      const voices = window.speechSynthesis.getVoices();
+      const selectedVoice = voices.find(v =>
         v.lang.startsWith("en") && v.name.includes("Google") && !v.localService
       ) || voices.find(v =>
         v.lang.startsWith("en-US") && v.name.includes("Google")
@@ -201,99 +338,9 @@ export default function ChatPage() {
         v.lang.startsWith("en") && v.name.includes("Google")
       ) || voices.find(v => v.lang.startsWith("en-US")) ||
         voices.find(v => v.lang.startsWith("en")) || null;
+      speakWithBrowser(cleanText, "en", emotion, selectedVoice, onDone);
     }
-
-    // Speak using browser Speech Synthesis
-    speakWithBrowser(cleanText, lang, emotion, selectedVoice, onDone);
-  }, [cancelAllSpeech]);
-
-  // ===== BROWSER TTS =====
-  const speakWithBrowser = (
-    text: string, lang: "ur" | "en" | "mixed", emotion: EmotionType,
-    voice: SpeechSynthesisVoice | null, onDone?: () => void
-  ) => {
-    // Split into smaller chunks
-    const maxLen = lang === "ur" ? 120 : 180;
-    const chunks = text.match(new RegExp(`.{1,${maxLen}}[.!?۔\\n]|.{1,${maxLen}}`, "g")) || [text];
-    let chunkIndex = 0;
-
-    setIsSpeaking(true);
-    isSpeakingRef.current = true;
-    speakQueueRef.current = true;
-
-    const speakChunk = () => {
-      if (!speakQueueRef.current || chunkIndex >= chunks.length) {
-        setIsSpeaking(false);
-        isSpeakingRef.current = false;
-        speakQueueRef.current = false;
-        onDone?.();
-        return;
-      }
-
-      const chunk = chunks[chunkIndex].trim();
-      if (!chunk) { chunkIndex++; speakChunk(); return; }
-
-      const utterance = new SpeechSynthesisUtterance(chunk);
-
-      if (voice) {
-        utterance.voice = voice;
-        utterance.lang = voice.lang;
-      } else {
-        utterance.lang = (lang === "ur" || lang === "mixed") ? "ur-PK" : "en-US";
-      }
-
-      utterance.rate = emotion === "happy" || emotion === "surprised" ? 1.0 : 0.88;
-      utterance.pitch = emotion === "happy" ? 1.1 : emotion === "serious" ? 0.85 : 1.0;
-      utterance.volume = 1.0;
-
-      utterance.onend = () => { chunkIndex++; speakChunk(); };
-      utterance.onerror = () => { chunkIndex++; speakChunk(); };
-
-      window.speechSynthesis.speak(utterance);
-    };
-
-    speakChunk();
-  };
-
-  // ===== AUDIO TAG TTS (Fallback for Urdu) =====
-  const speakWithAudioTag = (text: string, emotion: EmotionType, onDone?: () => void) => {
-    // Use Google Translate TTS via Audio tag (works better than fetch)
-    const maxLen = 200;
-    const textToSpeak = text.substring(0, maxLen);
-    const encoded = encodeURIComponent(textToSpeak);
-    const url = `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ur&q=${encoded}`;
-
-    const audio = new Audio(url);
-    currentAudioRef.current = audio;
-
-    setIsSpeaking(true);
-    isSpeakingRef.current = true;
-    speakQueueRef.current = true;
-
-    audio.onended = () => {
-      currentAudioRef.current = null;
-      setIsSpeaking(false);
-      isSpeakingRef.current = false;
-      speakQueueRef.current = false;
-      onDone?.();
-    };
-
-    audio.onerror = () => {
-      currentAudioRef.current = null;
-      // Fallback: try browser TTS with default voice and ur-PK lang
-      const voices = window.speechSynthesis.getVoices();
-      const anyVoice = voices.find(v => v.lang.startsWith("en")) || null;
-      speakWithBrowser(text, "ur", emotion, anyVoice, onDone);
-    };
-
-    audio.play().catch(() => {
-      currentAudioRef.current = null;
-      // Fallback: browser TTS
-      const voices = window.speechSynthesis.getVoices();
-      const anyVoice = voices.find(v => v.lang.startsWith("en")) || null;
-      speakWithBrowser(text, "ur", emotion, anyVoice, onDone);
-    });
-  };
+  }, [cancelAllSpeech, speakUrduCloud]);
 
   // ===== STT — Start Listening =====
   const startListening = useCallback((autoSend: boolean = false) => {
