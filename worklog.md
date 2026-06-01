@@ -1,28 +1,19 @@
-# JARVIS-HYBRID Worklog
 
 ---
-Task ID: 1
+Task ID: 1-2
 Agent: Main Agent
-Task: Natural Human-like JARVIS + Client Hunting System
+Task: Fix Urdu TTS natural voice + add story recorder + TTS provider indicator
 
 Work Log:
-- Rewrote entire system prompt in Urdu/Hindi for natural human conversation
-- Changed from robotic "You are JARVIS AI assistant" to "Tu JARVIS hai — Rayan Sir ka apna saathi"
-- Added human-like conversation rules: filler words, emotions, imperfections, warmth
-- Updated identity system: NEVER reveals AI, always says "I am Rayan Sir"
-- Updated TTS voices: OpenAI Nova for English, Shimmer for Urdu (most natural)
-- Updated ElevenLabs voice to Bella (most natural female voice)
-- Added new Freelance Agent actions: hunt_jobs, apply_to_job, full_pipeline, portfolio_pitch
-- Added new WhatsApp Agent action: client_chat (natural client conversation as Rayan Sir)
-- Updated LLM classifier with new actions and better Urdu keyword mapping
-- Updated Quick Actions: Hunt Jobs, Full Pipeline, Client Chat, Portfolio Pitch
-- Changed all UI text to Urdu for consistency
-- Changed brand icon from robot (🤖) to brain (🧠)
-- Build successful, pushed to GitHub
+- Identified ROOT CAUSE: ElevenLabs voice "Matilda" doesn't work for Urdu
+- All paid TTS providers silently failed for Urdu, falling back to Google Translate (robotic)
+- Updated TTS route with 5 Hindi/Urdu voices with auto-try
+- Added story recording system with download
+- Added TTS provider indicator in UI
+- Build successful, pushed to GitHub, auto-deploy to Vercel
 
 Stage Summary:
-- JARVIS now talks like a real human, not a robot
-- Client Hunting system with full pipeline (hunt → apply → negotiate → report)
-- Identity masking: always presents as "Rayan Sir", never reveals AI
-- Natural TTS with Nova/Shimmer voices
-- All changes deployed to Vercel via GitHub push
+- Urdu TTS now tries multiple Hindi/Urdu voices (Dhi, Maitreyi, Lily, etc.)
+- TTS provider indicator shows which engine is playing (green=natural, red=robotic)
+- Story recorder feature added (📖 button in header)
+- Deployed to Vercel
