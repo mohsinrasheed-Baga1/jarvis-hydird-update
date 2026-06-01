@@ -1,0 +1,1233 @@
+     1→     1→const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, dialog, shell, net, session } = require('electron');
+     2→     2→const path = require('path');
+     3→     3→const fs = require('fs');
+     4→     4→const { exec, spawn } = require('child_process');
+     5→     5→
+     6→     6→// ─── Load .env file for API keys ───
+     7→     7→// This allows users to set GROQ_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY etc. in a .env file
+     8→     8→try {
+     9→     9→  const envPaths = [
+    10→    10→    path.join(__dirname, '..', '.env'),
+    11→    11→    path.join(__dirname, '..', '..', '.env'),
+    12→    12→    path.join(process.cwd(), '.env'),
+    13→    13→  ];
+    14→    14→  for (const envPath of envPaths) {
+    15→    15→    if (fs.existsSync(envPath)) {
+    16→    16→      const envContent = fs.readFileSync(envPath, 'utf8');
+    17→    17→      for (const line of envContent.split('\n')) {
+    18→    18→        const trimmed = line.trim();
+    19→    19→        if (!trimmed || trimmed.startsWith('#')) continue;
+    20→    20→        const match = trimmed.match(/^([A-Z_]+)=(.*)$/);
+    21→    21→        if (match && !process.env[match[1]]) {
+    22→    22→          process.env[match[1]] = match[2].replace(/^["']|["']$/g, '');
+    23→    23→        }
+    24→    24→      }
+    25→    25→      break;
+    26→    26→    }
+    27→    27→  }
+    28→    28→} catch {}
+    29→    29→
+    30→    30→// ─── Configuration ───
+    31→    31→const CLOUD_APP_URL = 'http://127.0.0.1:3000';
+    32→    32→const VITE_DEV_URL = 'http://127.0.0.1:5173';
+    33→    33→const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
+    34→    34→const APP_VERSION = '2.3.0';
+    35→    35→const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
+    36→    36→const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
+    37→    37→const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
+    38→    38→
+    39→    39→function isPipeClosedError(err) {
+    40→    40→  return err && (err.code === 'EPIPE' || String(err.message || '').includes('EPIPE'));
+    41→    41→}
+    42→    42→
+    43→    43→function ignoreClosedPipe(err) {
+    44→    44→  if (!isPipeClosedError(err)) {
+    45→    45→    try { fs.appendFileSync(path.join(app.getPath('userData'), 'jarvis-main.log'), `[pipe-error] ${err.message || err}\n`); } catch {}
+    46→    46→  }
+    47→    47→}
+    48→    48→
+    49→    49→try { process.stdout?.on?.('error', ignoreClosedPipe); } catch {}
+    50→    50→try { process.stderr?.on?.('error', ignoreClosedPipe); } catch {}
+    51→    51→
+    52→    52→// ─── Subprocess Management ───
+    53→    53→let cloudProcess = null;
+    54→    54→let pythonProcess = null;
+    55→    55→let cloudReady = false;
+    56→    56→let pythonReady = false;
+    57→    57→let cloudError = '';
+    58→    58→let pythonError = '';
+    59→    59→const MAX_STARTUP_WAIT = 30000; // 30 seconds
+    60→    60→
+    61→    61→function runCommand(command, args = [], options = {}) {
+    62→    62→  return new Promise((resolve) => {
+    63→    63→    const child = spawn(command, args, { shell: false, windowsHide: true, ...options });
+    64→    64→    let stdout = '';
+    65→    65→    let stderr = '';
+    66→    66→    child.stdout?.on('data', data => { stdout += data.toString(); });
+    67→    67→    child.stderr?.on('data', data => { stderr += data.toString(); });
+    68→    68→    child.on('error', err => resolve({ success: false, error: err.message, stdout, stderr }));
+    69→    69→    child.on('close', code => resolve({ success: code === 0, code, stdout, stderr, error: code === 0 ? '' : (stderr || `Exit code ${code}`) }));
+    70→    70→  });
+    71→    71→}
+    72→    72→
+    73→    73→function ps(script) {
+    74→    74→  return runCommand('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeout: 15000 });
+    75→    75→}
+    76→    76→
+    77→    77→function sendVolumeKey(keyCode, count = 1) {
+    78→    78→  const safeCount = Math.max(1, Math.min(20, Number(count) || 1));
+    79→    79→  return ps(`$wsh = New-Object -ComObject WScript.Shell; 1..${safeCount} | ForEach-Object { $wsh.SendKeys([char]${keyCode}); Start-Sleep -Milliseconds 35 }`);
+    80→    80→}
+    81→    81→
+    82→    82→function normalizeAppName(name = '') {
+    83→    83→  const value = String(name).toLowerCase().trim();
+    84→    84→  const apps = {
+    85→    85→    notepad: 'notepad.exe',
+    86→    86→    chrome: 'chrome.exe',
+    87→    87→    calculator: 'calc.exe',
+    88→    88→    calc: 'calc.exe',
+    89→    89→    paint: 'mspaint.exe',
+    90→    90→    wordpad: 'write.exe',
+    91→    91→    cmd: 'cmd.exe',
+    92→    92→    powershell: 'powershell.exe',
+    93→    93→  };
+    94→    94→  return apps[value] || name;
+    95→    95→}
+    96→    96→
+    97→    97→async function executeDesktopAction(action = {}) {
+    98→    98→  const type = action.type || action.action;
+    99→    99→  if (type === 'open-url' || type === 'open_url') {
+   100→   100→    await shell.openExternal(action.url);
+   101→   101→    return { success: true, message: 'Opened URL' };
+   102→   102→  }
+   103→   103→  if (type === 'search-google' || type === 'google_search') {
+   104→   104→    await shell.openExternal('https://www.google.com/search?q=' + encodeURIComponent(action.query || ''));
+   105→   105→    return { success: true, message: 'Google search opened' };
+   106→   106→  }
+   107→   107→  if (type === 'open-youtube' || type === 'play-youtube' || type === 'search-youtube' || type === 'youtube_search') {
+   108→   108→    const query = action.query || '';
+   109→   109→    const url = query
+   110→   110→      ? 'https://www.youtube.com/results?search_query=' + encodeURIComponent(query)
+   111→   111→      : 'https://www.youtube.com';
+   112→   112→    await shell.openExternal(url);
+   113→   113→    return { success: true, message: query ? 'YouTube search opened' : 'YouTube opened' };
+   114→   114→  }
+   115→   115→  if (type === 'open-app' || type === 'open_app') {
+   116→   116→    exec(process.platform === 'win32' ? `start "" "${normalizeAppName(action.app || action.name)}"` : `open -a "${action.app || action.name}"`);
+   117→   117→    return { success: true, message: `Opened ${action.app || action.name}` };
+   118→   118→  }
+   119→   119→  if (type === 'play-audio' || type === 'play_audio') {
+   120→   120→    // Open audio URL in default browser/player
+   121→   121→    const audioUrl = action.url || '';
+   122→   122→    if (audioUrl) {
+   123→   123→      await shell.openExternal(audioUrl);
+   124→   124→      return { success: true, message: 'Audio opened' };
+   125→   125→    }
+   126→   126→    // If no URL but has query, search on YouTube
+   127→   127→    if (action.query) {
+   128→   128→      const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(action.query);
+   129→   129→      await shell.openExternal(url);
+   130→   130→      return { success: true, message: 'Audio search opened on YouTube' };
+   131→   131→    }
+   132→   132→    return { success: false, message: 'No audio URL or query provided' };
+   133→   133→  }
+   134→   134→  if (type === 'open-whatsapp' || type === 'whatsapp') {
+   135→   135→    const phone = action.phone || action.number || '';
+   136→   136→    const message = action.message || action.text || '';
+   137→   137→    const url = phone
+   138→   138→      ? `https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}${message ? '&text=' + encodeURIComponent(message) : ''}`
+   139→   139→      : 'https://web.whatsapp.com';
+   140→   140→    await shell.openExternal(url);
+   141→   141→    return { success: true, message: phone ? 'WhatsApp chat opened' : 'WhatsApp Web opened' };
+   142→   142→  }
+   143→   143→  if (type === 'volume-up' || type === 'volume_up') {
+   144→   144→    if (process.platform === 'win32') return { ...(await sendVolumeKey(175, action.steps || 5)), message: 'Volume increased' };
+   145→   145→  }
+   146→   146→  if (type === 'volume-down' || type === 'volume_down') {
+   147→   147→    if (process.platform === 'win32') return { ...(await sendVolumeKey(174, action.steps || 5)), message: 'Volume decreased' };
+   148→   148→  }
+   149→   149→  if (type === 'mute-toggle' || type === 'mute_toggle' || type === 'mute' || type === 'unmute') {
+   150→   150→    if (process.platform === 'win32') return { ...(await sendVolumeKey(173, 1)), message: 'Mute toggled' };
+   151→   151→  }
+   152→   152→  if (type === 'screenshot') {
+   153→   153→    const file = action.path || path.join(app.getPath('pictures'), `jarvis-screenshot-${Date.now()}.png`);
+   154→   154→    const escaped = file.replace(/'/g, "''");
+   155→   155→    const result = await ps(`Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $bmp.Save('${escaped}', [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose(); Write-Output '${escaped}'`);
+   156→   156→    return { success: result.success, message: `Screenshot saved: ${file}`, path: file, error: result.error };
+   157→   157→  }
+   158→   158→  if (type === 'system-command') {
+   159→   159→    const allowed = new Set(['lock']);
+   160→   160→    if (!allowed.has(action.command)) return { success: false, message: 'Command not allowed from UI' };
+   161→   161→    if (process.platform === 'win32') exec('rundll32.exe user32.dll,LockWorkStation');
+   162→   162→    return { success: true, message: 'Command sent' };
+   163→   163→  }
+   164→   164→  return { success: false, message: 'Unknown desktop action' };
+   165→   165→}
+   166→   166→
+   167→   167→async function listenWithWindowsSpeech(language = 'en-US') {
+   168→   168→  if (process.platform !== 'win32') {
+   169→   169→    return { success: false, error: 'Windows Speech API is only available on Windows' };
+   170→   170→  }
+   171→   171→  const culture = String(language).startsWith('ur') ? 'ur-PK' : 'en-US';
+   172→   172→  const script = `
+   173→   173→Add-Type -AssemblyName System.Speech
+   174→   174→$culture = New-Object System.Globalization.CultureInfo('${culture}')
+   175→   175→$recognizer = New-Object System.Speech.Recognition.SpeechRecognitionEngine($culture)
+   176→   176→$recognizer.SetInputToDefaultAudioDevice()
+   177→   177→$dictation = New-Object System.Speech.Recognition.DictationGrammar
+   178→   178→$recognizer.LoadGrammar($dictation)
+   179→   179→$result = $recognizer.Recognize([TimeSpan]::FromSeconds(8))
+   180→   180→if ($result -and $result.Text) { Write-Output $result.Text }
+   181→   181→$recognizer.Dispose()
+   182→   182→`;
+   183→   183→  const result = await ps(script);
+   184→   184→  const text = (result.stdout || '').trim();
+   185→   185→  return text ? { success: true, text, method: 'windows-speech' } : { success: false, error: result.error || 'No speech recognized' };
+   186→   186→}
+   187→   187→
+   188→   188→// ─── Logging Setup ───
+   189→   189→const logDir = path.join(app.getPath('userData'), 'logs');
+   190→   190→try { fs.mkdirSync(logDir, { recursive: true }); } catch {}
+   191→   191→const logFile = path.join(logDir, 'jarvis-main.log');
+   192→   192→function writeConsoleLog(level, args) {
+   193→   193→  try {
+   194→   194→    fs.appendFileSync(logFile, `[console:${level}] ${args.map(formatLogArg).join(' ')}\n`);
+   195→   195→  } catch {}
+   196→   196→}
+   197→   197→
+   198→   198→console.log = (...args) => writeConsoleLog('log', args);
+   199→   199→console.warn = (...args) => writeConsoleLog('warn', args);
+   200→   200→console.error = (...args) => writeConsoleLog('error', args);
+   201→   201→
+   202→   202→function formatLogArg(arg) {
+   203→   203→  if (typeof arg === 'string') return arg;
+   204→   204→  if (arg instanceof Error) return arg.stack || arg.message;
+   205→   205→  try { return JSON.stringify(arg); } catch { return String(arg); }
+   206→   206→}
+   207→   207→
+   208→   208→function safeConsole(method, message) {
+   209→   209→  writeConsoleLog(method, [message]);
+   210→   210→}
+   211→   211→
+   212→   212→function log(level, ...args) {
+   213→   213→  const ts = new Date().toISOString();
+   214→   214→  const msg = `[${ts}] [${level}] ${args.map(formatLogArg).join(' ')}\n`;
+   215→   215→  try { fs.appendFileSync(logFile, msg); } catch {}
+   216→   216→  safeConsole(level === 'ERROR' ? 'error' : level === 'WARN' ? 'warn' : 'log', msg.trimEnd());
+   217→   217→}
+   218→   218→
+   219→   219→process.on('uncaughtException', (err) => {
+   220→   220→  if (isPipeClosedError(err)) {
+   221→   221→    log('WARN', 'Ignored closed pipe from detached launcher');
+   222→   222→    return;
+   223→   223→  }
+   224→   224→  log('ERROR', 'Uncaught exception:', err);
+   225→   225→  try { dialog.showErrorBox('JARVIS Error', err.message || String(err)); } catch {}
+   226→   226→});
+   227→   227→
+   228→   228→function attachProcessLogging(child, name, onStdout, onStderr) {
+   229→   229→  const attach = (stream, level, handler) => {
+   230→   230→    if (!stream || stream.destroyed || stream.readableEnded) return;
+   231→   231→    stream.on('data', (data) => {
+   232→   232→      try {
+   233→   233→        handler(data.toString());
+   234→   234→      } catch (err) {
+   235→   235→        if (!isPipeClosedError(err)) log('WARN', `[${name}] Stream handler failed:`, err.message);
+   236→   236→      }
+   237→   237→    });
+   238→   238→    stream.on('error', (err) => {
+   239→   239→      if (!isPipeClosedError(err)) log(level, `[${name}] Stream error:`, err.message);
+   240→   240→    });
+   241→   241→  };
+   242→   242→  attach(child?.stdout, 'WARN', onStdout);
+   243→   243→  attach(child?.stderr, 'WARN', onStderr);
+   244→   244→}
+   245→   245→log('INFO', '═══════════════════════════════════════');
+   246→   246→log('INFO', 'JARVIS Hybrid Desktop v' + APP_VERSION + ' starting...');
+   247→   247→log('INFO', 'Platform:', process.platform, 'Arch:', process.arch);
+   248→   248→
+   249→   249→// ─── Path Resolution ───
+   250→   250→function getProjectRoot() {
+   251→   251→  // In development: electron/main.js is inside desktop-app/
+   252→   252→  // In production: we're inside resources/app.asar
+   253→   253→  const devRoot = path.join(__dirname, '..', '..');
+   254→   254→  const prodRoot = path.join(process.resourcesPath, 'app');
+   255→   255→
+   256→   256→  if (fs.existsSync(path.join(devRoot, 'package.json'))) {
+   257→   257→    return devRoot;
+   258→   258→  }
+   259→   259→  return prodRoot;
+   260→   260→}
+   261→   261→
+   262→   262→function getPythonPath() {
+   263→   263→  const root = getProjectRoot();
+   264→   264→  const venvPython = path.join(root, '.venv', 'Scripts', 'python.exe');
+   265→   265→  const systemPython = 'python';
+   266→   266→
+   267→   267→  if (fs.existsSync(venvPython)) {
+   268→   268→    return venvPython;
+   269→   269→  }
+   270→   270→  return systemPython;
+   271→   271→}
+   272→   272→
+   273→   273→// ─── Subprocess Launchers ───
+   274→   274→async function launchCloudBackend() {
+   275→   275→  return new Promise(async (resolve, reject) => {
+   276→   276→    log('INFO', '[Launcher] Starting cloud backend...');
+   277→   277→
+   278→   278→    const root = getProjectRoot();
+   279→   279→    const isWindows = process.platform === 'win32';
+   280→   280→
+   281→   281→    // Check if npm is available
+   282→   282→    const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+   283→   283→
+   284→   284→    try {
+   285→   285→      if (await checkCloudHealth()) {
+   286→   286→        cloudReady = true;
+   287→   287→        cloudError = '';
+   288→   288→        log('INFO', '[Launcher] Existing cloud backend detected');
+   289→   289→        resolve(true);
+   290→   290→        return;
+   291→   291→      }
+   292→   292→
+   293→   293→      cloudProcess = spawn(npmCmd, ['run', 'dev', '--', '--hostname', '127.0.0.1', '--port', '3000'], {
+   294→   294→        cwd: root,
+   295→   295→        shell: true,
+   296→   296→        stdio: ['ignore', 'pipe', 'pipe'],
+   297→   297→      });
+   298→   298→
+   299→   299→      attachProcessLogging(cloudProcess, 'Cloud', (output) => {
+   300→   300→        log('INFO', '[Cloud]', output.trim());
+   301→   301→
+   302→   302→        // Check for ready signal
+   303→   303→        if (output.includes('ready') || output.includes('started server') || output.includes('Local:')) {
+   304→   304→          waitForCloud().then((ready) => {
+   305→   305→            cloudReady = ready;
+   306→   306→            cloudError = ready ? '' : 'Next.js started, but /api/health did not answer on http://127.0.0.1:3000';
+   307→   307→            log(ready ? 'INFO' : 'WARN', '[Launcher]', ready ? 'Cloud backend ready' : cloudError);
+   308→   308→            resolve(ready);
+   309→   309→          });
+   310→   310→        }
+   311→   311→      }, (output) => {
+   312→   312→        output = output.trim();
+   313→   313→        if (output) cloudError = output.split(/\r?\n/).slice(-1)[0];
+   314→   314→        log('WARN', '[Cloud]', output);
+   315→   315→      });
+   316→   316→
+   317→   317→      cloudProcess.on('error', (err) => {
+   318→   318→        cloudError = err.message;
+   319→   319→        log('ERROR', '[Cloud] Process error:', err.message);
+   320→   320→        reject(err);
+   321→   321→      });
+   322→   322→
+   323→   323→      cloudProcess.on('close', (code) => {
+   324→   324→        log('INFO', '[Cloud] Process exited with code:', code);
+   325→   325→        cloudReady = false;
+   326→   326→        if (code !== 0 && code !== null) cloudError = `Next.js process exited with code ${code}`;
+   327→   327→      });
+   328→   328→
+   329→   329→      // Timeout fallback
+   330→   330→      setTimeout(() => {
+   331→   331→        if (!cloudReady) {
+   332→   332→          cloudError = cloudError || 'Next.js startup timed out on http://127.0.0.1:3000';
+   333→   333→          log('WARN', '[Launcher]', cloudError);
+   334→   334→          resolve(false);
+   335→   335→        }
+   336→   336→      }, MAX_STARTUP_WAIT);
+   337→   337→
+   338→   338→    } catch (err) {
+   339→   339→      cloudError = err.message;
+   340→   340→      log('ERROR', '[Launcher] Failed to start cloud:', err.message);
+   341→   341→      reject(err);
+   342→   342→    }
+   343→   343→  });
+   344→   344→}
+   345→   345→
+   346→   346→async function launchPythonAgent() {
+   347→   347→  return new Promise((resolve, reject) => {
+   348→   348→    log('INFO', '[Launcher] Starting Python desktop agent...');
+   349→   349→
+   350→   350→    const root = getProjectRoot();
+   351→   351→    const pythonPath = getPythonPath();
+   352→   352→    const desktopPath = path.join(root, 'desktop');
+   353→   353→
+   354→   354→    try {
+   355→   355→      const args = [
+   356→   356→        '-m', 'jarvis.main',
+   357→   357→        '--cloud-url', CLOUD_APP_URL,
+   358→   358→        '--no-voice',
+   359→   359→        '--background',
+   360→   360→      ];
+   361→   361→
+   362→   362→      pythonProcess = spawn(pythonPath, args, {
+   363→   363→        cwd: desktopPath,
+   364→   364→        shell: true,
+   365→   365→        stdio: ['ignore', 'pipe', 'pipe'],
+   366→   366→      });
+   367→   367→
+   368→   368→      attachProcessLogging(pythonProcess, 'Python', (output) => {
+   369→   369→        log('INFO', '[Python]', output.trim());
+   370→   370→
+   371→   371→        // Check for ready signal
+   372→   372→        if (output.includes('Ready') || output.includes('started') || output.includes('Online')) {
+   373→   373→          pythonReady = true;
+   374→   374→          log('INFO', '[Launcher] ✅ Python agent ready');
+   375→   375→          resolve(true);
+   376→   376→        }
+   377→   377→      }, (output) => {
+   378→   378→        output = output.trim();
+   379→   379→        if (output) pythonError = output.split(/\r?\n/).slice(-1)[0];
+   380→   380→        log('WARN', '[Python]', output);
+   381→   381→      });
+   382→   382→
+   383→   383→      pythonProcess.on('error', (err) => {
+   384→   384→        pythonError = err.message;
+   385→   385→        log('ERROR', '[Python] Process error:', err.message);
+   386→   386→        reject(err);
+   387→   387→      });
+   388→   388→
+   389→   389→      pythonProcess.on('close', (code) => {
+   390→   390→        log('INFO', '[Python] Process exited with code:', code);
+   391→   391→        pythonReady = false;
+   392→   392→        if (code !== 0 && code !== null) pythonError = `Python agent exited with code ${code}`;
+   393→   393→      });
+   394→   394→
+   395→   395→      // Timeout fallback
+   396→   396→      setTimeout(() => {
+   397→   397→        if (!pythonReady) {
+   398→   398→          pythonError = pythonError || 'Python agent startup timed out';
+   399→   399→          log('WARN', '[Launcher]', pythonError);
+   400→   400→          resolve(false);
+   401→   401→        }
+   402→   402→      }, MAX_STARTUP_WAIT);
+   403→   403→
+   404→   404→    } catch (err) {
+   405→   405→      pythonError = err.message;
+   406→   406→      log('ERROR', '[Launcher] Failed to start Python:', err.message);
+   407→   407→      reject(err);
+   408→   408→    }
+   409→   409→  });
+   410→   410→}
+   411→   411→
+   412→   412→async function checkCloudHealth() {
+   413→   413→  return new Promise((resolve) => {
+   414→   414→  const request = net.request(CLOUD_APP_URL + '/api/health');
+   415→   415→    request.on('response', (response) => {
+   416→   416→      resolve(response.statusCode === 200);
+   417→   417→    });
+   418→   418→    request.on('error', () => resolve(false));
+   419→   419→    request.end();
+   420→   420→  });
+   421→   421→}
+   422→   422→
+   423→   423→async function waitForCloud() {
+   424→   424→  log('INFO', '[Launcher] Waiting for cloud to be ready...');
+   425→   425→
+   426→   426→  const maxAttempts = 30;
+   427→   427→  for (let i = 0; i < maxAttempts; i++) {
+   428→   428→    const healthy = await checkCloudHealth();
+   429→   429→    if (healthy) {
+   430→   430→      log('INFO', '[Launcher] ✅ Cloud health check passed');
+   431→   431→      return true;
+   432→   432→    }
+   433→   433→    await new Promise(r => setTimeout(r, 1000));
+   434→   434→  }
+   435→   435→
+   436→   436→  log('WARN', '[Launcher] Cloud health check timed out');
+   437→   437→  return false;
+   438→   438→}
+   439→   439→
+   440→   440→function cleanupProcesses() {
+   441→   441→  log('INFO', '[Launcher] Cleaning up subprocesses...');
+   442→   442→
+   443→   443→  if (cloudProcess) {
+   444→   444→    try {
+   445→   445→      cloudProcess.kill();
+   446→   446→      log('INFO', '[Launcher] Cloud process killed');
+   447→   447→    } catch (err) {
+   448→   448→      log('WARN', '[Launcher] Failed to kill cloud:', err.message);
+   449→   449→    }
+   450→   450→  }
+   451→   451→
+   452→   452→  if (pythonProcess) {
+   453→   453→    try {
+   454→   454→      pythonProcess.kill();
+   455→   455→      log('INFO', '[Launcher] Python process killed');
+   456→   456→    } catch (err) {
+   457→   457→      log('WARN', '[Launcher] Failed to kill Python:', err.message);
+   458→   458→    }
+   459→   459→  }
+   460→   460→}
+   461→   461→
+   462→   462→// ─── Auto-Updater ───
+   463→   463→let autoUpdater = null;
+   464→   464→try {
+   465→   465→  const { autoUpdater: au } = require('electron-updater');
+   466→   466→  autoUpdater = au;
+   467→   467→  autoUpdater.autoDownload = true;
+   468→   468→  autoUpdater.autoInstallOnAppQuit = true;
+   469→   469→  autoUpdater.logger = {
+   470→   470→    info: (...a) => log('INFO', '[Updater]', ...a),
+   471→   471→    error: (...a) => log('ERROR', '[Updater]', ...a),
+   472→   472→    warn: (...a) => log('WARN', '[Updater]', ...a),
+   473→   473→  };
+   474→   474→  log('INFO', 'electron-updater loaded');
+   475→   475→} catch (err) {
+   476→   476→  log('WARN', 'electron-updater not available:', err.message);
+   477→   477→}
+   478→   478→
+   479→   479→// ─── State ───
+   480→   480→let mainWindow = null;
+   481→   481→let tray = null;
+   482→   482→let isQuitting = false;
+   483→   483→let trayCreated = false;
+   484→   484→let loadFailed = false;
+   485→   485→let lastWebVersion = null;
+   486→   486→let updateDownloaded = false;
+   487→   487→
+   488→   488→// ─── Icon Path Resolution ───
+   489→   489→function getIconPath() {
+   490→   490→  const candidates = [
+   491→   491→    path.join(process.resourcesPath, 'app.asar', 'assets', 'icon.png'),
+   492→   492→    path.join(__dirname, '..', 'assets', 'icon.png'),
+   493→   493→    path.join(__dirname, 'assets', 'icon.png'),
+   494→   494→    path.join(process.resourcesPath, 'assets', 'icon.png'),
+   495→   495→  ];
+   496→   496→  for (const p of candidates) {
+   497→   497→    try { if (fs.existsSync(p)) { log('INFO', 'Icon found:', p); return p; } } catch {}
+   498→   498→  }
+   499→   499→  log('WARN', 'No icon.png found');
+   500→   500→  return undefined;
+   501→   501→}
+   502→   502→
+   503→   503→function isOnline() { return net.isOnline(); }
+   504→   504→
+   505→   505→async function clearBrowserCache() {
+   506→   506→  try {
+   507→   507→    if (mainWindow && !mainWindow.isDestroyed()) {
+   508→   508→      const ses = mainWindow.webContents.session;
+   509→   509→      await ses.clearCache();
+   510→   510→      await ses.clearStorageData({ storages: ['cache', 'serviceworker', 'shadercache'] });
+   511→   511→      log('INFO', 'Browser cache cleared');
+   512→   512→    }
+   513→   513→  } catch (err) { log('WARN', 'Failed to clear cache:', err.message); }
+   514→   514→}
+   515→   515→
+   516→   516→// ─── Create Window ───
+   517→   517→function createWindow() {
+   518→   518→  log('INFO', 'Creating main window...');
+   519→   519→  const iconPath = getIconPath();
+   520→   520→  const windowOptions = {
+   521→   521→    width: 1400, height: 900, minWidth: 1000, minHeight: 700,
+   522→   522→    backgroundColor: '#0a0a0f', show: false,
+   523→   523→    webPreferences: {
+   524→   524→      nodeIntegration: false,
+   525→   525→      contextIsolation: true,
+   526→   526→      preload: path.join(__dirname, 'preload.js'),
+   527→   527→      sandbox: false,
+   528→   528→      webSecurity: true,
+   529→   529→      partition: 'persist:jarvis',
+   530→   530→    },
+   531→   531→  };
+   532→   532→  if (iconPath) windowOptions.icon = iconPath;
+   533→   533→
+   534→   534→  if (process.platform === 'win32') {
+   535→   535→    try {
+   536→   536→      const winVer = parseFloat(require('os').release());
+   537→   537→      if (winVer >= 10) {
+   538→   538→        windowOptions.frame = true;
+   539→   539→        windowOptions.titleBarStyle = 'hidden';
+   540→   540→        windowOptions.titleBarOverlay = { color: '#0a0a0f', symbolColor: '#a29bfe', height: 36 };
+   541→   541→      } else { windowOptions.frame = false; }
+   542→   542→    } catch { windowOptions.frame = false; }
+   543→   543→  } else if (process.platform === 'darwin') {
+   544→   544→    windowOptions.titleBarStyle = 'hiddenInset'; windowOptions.frame = true;
+   545→   545→  } else { windowOptions.frame = false; }
+   546→   546→
+   547→   547→  try { mainWindow = new BrowserWindow(windowOptions); } catch (err) {
+   548→   548→    log('ERROR', 'Failed to create BrowserWindow:', err.message);
+   549→   549→    try {
+   550→   550→      mainWindow = new BrowserWindow({ width: 1200, height: 800, show: false,
+   551→   551→        webPreferences: { nodeIntegration: false, contextIsolation: true, preload: path.join(__dirname, 'preload.js') } });
+   552→   552→    } catch (err2) { dialog.showErrorBox('JARVIS Error', 'Could not create window: ' + err2.message); app.quit(); return; }
+   553→   553→  }
+   554→   554→
+   555→   555→  // Grant microphone permission
+   556→   556→  mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
+   557→   557→    const allowed = ['media', 'clipboard-read', 'clipboard-write', 'display-capture'];
+   558→   558→    callback(allowed.includes(permission));
+   559→   559→  });
+   560→   560→  mainWindow.webContents.session.setPermissionCheckHandler((webContents, permission) => {
+   561→   561→    return ['media', 'clipboard-read', 'clipboard-write', 'display-capture'].includes(permission);
+   562→   562→  });
+   563→   563→
+   564→   564→  loadWebApp();
+   565→   565→
+   566→   566→  mainWindow.once('ready-to-show', () => { mainWindow.show(); mainWindow.focus(); });
+   567→   567→  setTimeout(() => { if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) { mainWindow.show(); mainWindow.focus(); } }, 5000);
+   568→   568→
+   569→   569→  mainWindow.webContents.on('did-finish-load', () => {
+   570→   570→    log('INFO', 'Page loaded successfully');
+   571→   571→    loadFailed = false;
+   572→   572→    mainWindow.webContents.executeJavaScript(`
+   573→   573→      if (window.electronAPI) {
+   574→   574→        window.__JARVIS_DESKTOP__ = true;
+   575→   575→        window.__JARVIS_VERSION__ = '${APP_VERSION}';
+   576→   576→        window.__JARVIS_PLATFORM__ = '${process.platform}';
+   577→   577→      }
+   578→   578→    `).catch(() => {});
+   579→   579→  });
+   580→   580→  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDesc) => {
+   581→   581→    log('ERROR', 'Failed to load:', errorCode, errorDesc);
+   582→   582→    loadFailed = true;
+   583→   583→    showOfflinePage(errorDesc);
+   584→   584→  });
+   585→   585→  mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+   586→   586→
+   587→   587→  mainWindow.webContents.on('before-input-event', (event, input) => {
+   588→   588→    if (input.control && input.shift && input.key.toLowerCase() === 'r') { event.preventDefault(); hardRefresh(); }
+   589→   589→    if (input.control && input.shift && input.key.toLowerCase() === 'd') { event.preventDefault(); mainWindow.webContents.toggleDevTools(); }
+   590→   590→    if (input.control && input.shift && input.key.toLowerCase() === 'u') { event.preventDefault(); checkForUpdates(); }
+   591→   591→  });
+   592→   592→
+   593→   593→  mainWindow.on('close', (e) => {
+   594→   594→    if (!isQuitting) { e.preventDefault(); if (trayCreated) mainWindow.hide(); else mainWindow.minimize(); }
+   595→   595→  });
+   596→   596→  mainWindow.on('closed', () => { mainWindow = null; });
+   597→   597→}
+   598→   598→
+   599→   599→function loadWebApp() {
+   600→   600→  if (!mainWindow || mainWindow.isDestroyed()) return;
+   601→   601→
+   602→   602→  const appUrl = app.isPackaged || LOAD_DIST_UI
+   603→   603→    ? 'file://' + path.join(__dirname, '..', 'dist', 'index.html')
+   604→   604→    : VITE_DEV_URL;
+   605→   605→  log('INFO', 'Loading UI:', appUrl);
+   606→   606→
+   607→   607→  if (app.isPackaged || isOnline()) {
+   608→   608→    mainWindow.loadURL(appUrl, {
+   609→   609→      userAgent: 'JARVIS-Hybrid-Desktop/' + APP_VERSION + ' (' + process.platform + ')',
+   610→   610→      extraHeaders: 'Cache-Control: no-cache\nPragma: no-cache\n',
+   611→   611→    }).catch(err => {
+   612→   612→      log('ERROR', 'Failed to load modern UI:', err.message);
+   613→   613→      if (isOnline()) {
+   614→   614→        mainWindow.loadURL(REMOTE_FALLBACK_URL).catch(() => showOfflinePage('Connection failed'));
+   615→   615→      } else {
+   616→   616→        showOfflinePage('Connection failed');
+   617→   617→      }
+   618→   618→    });
+   619→   619→  } else { showOfflinePage('No internet connection'); }
+   620→   620→}
+   621→   621→
+   622→   622→async function hardRefresh() {
+   623→   623→  await clearBrowserCache();
+   624→   624→  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reloadIgnoringCache();
+   625→   625→}
+   626→   626→
+   627→   627→function showOfflinePage(reason) {
+   628→   628→  if (!mainWindow || mainWindow.isDestroyed()) return;
+   629→   629→  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>JARVIS - Offline</title>
+   630→   630→  <style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0a0a0f;color:#e2e8f0;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh}
+   631→   631→  .c{text-align:center;max-width:500px;padding:40px}.logo{width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,#6c5ce7,#00cec9);display:flex;align-items:center;justify-content:center;margin:0 auto 24px;font-size:36px;box-shadow:0 0 30px rgba(108,92,231,0.4)}
+   632→   632→  h1{font-size:28px;margin-bottom:12px;color:#a29bfe}p{color:#8a8a9a;font-size:16px;margin-bottom:24px}
+   633→   633→  .btn{background:linear-gradient(135deg,#6c5ce7,#a29bfe);color:#fff;border:none;padding:14px 32px;border-radius:12px;font-size:16px;cursor:pointer;font-weight:600}
+   634→   634→  .btn:hover{transform:translateY(-2px)}</style></head>
+   635→   635→  <body><div class="c"><div class="logo">🤖</div><h1>JARVIS Hybrid</h1>
+   636→   636→  <p>انٹرنیٹ کنکشن نہیں ملا</p>${reason ? '<p style="color:#ff6b6b;font-size:13px">' + reason + '</p>' : ''}
+   637→   637→  <button class="btn" onclick="window.electronAPI?.retryLoad()">🔄 دوبارہ کوشش</button>
+   638→   638→  <p style="margin-top:20px;font-size:12px;color:#555">JARVIS Hybrid Desktop v${APP_VERSION}</p></div></body></html>`;
+   639→   639→  mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html)).catch(() => {});
+   640→   640→}
+   641→   641→
+   642→   642→function createTray() {
+   643→   643→  try {
+   644→   644→    const iconPath = getIconPath();
+   645→   645→    if (!iconPath) { log('WARN', 'No icon for tray'); return; }
+   646→   646→    tray = new Tray(iconPath);
+   647→   647→    trayCreated = true;
+   648→   648→    tray.setContextMenu(Menu.buildFromTemplate([
+   649→   649→      { label: 'JARVIS v' + APP_VERSION, enabled: false },
+   650→   650→      { type: 'separator' },
+   651→   651→      { label: 'Open', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } else createWindow(); } },
+   652→   652→      { label: 'Hard Refresh', click: () => hardRefresh() },
+   653→   653→      { type: 'separator' },
+   654→   654→      { label: 'Check Updates', click: () => checkForUpdates() },
+   655→   655→      { type: 'separator' },
+   656→   656→      { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
+   657→   657→    ]));
+   658→   658→    tray.setToolTip('JARVIS Hybrid v' + APP_VERSION);
+   659→   659→    tray.on('double-click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } else createWindow(); });
+   660→   660→  } catch (err) { log('WARN', 'Failed to create tray:', err.message); trayCreated = false; }
+   661→   661→}
+   662→   662→
+   663→   663→// ─── Auto-Update ───
+   664→   664→function checkForUpdates() {
+   665→   665→  if (!app.isPackaged) {
+   666→   666→    log('INFO', 'Skipping update check (dev mode)');
+   667→   667→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'dev-mode' });
+   668→   668→    return;
+   669→   669→  }
+   670→   670→  if (!autoUpdater) {
+   671→   671→    log('WARN', 'Auto-updater not available');
+   672→   672→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'not-available' });
+   673→   673→    return;
+   674→   674→  }
+   675→   675→  log('INFO', 'Checking for updates...');
+   676→   676→  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'checking' });
+   677→   677→  autoUpdater.checkForUpdates().catch(err => {
+   678→   678→    log('ERROR', 'Update check failed:', err.message);
+   679→   679→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'error', message: err.message });
+   680→   680→  });
+   681→   681→}
+   682→   682→
+   683→   683→if (autoUpdater) {
+   684→   684→  autoUpdater.on('update-available', (info) => {
+   685→   685→    log('INFO', 'Update available:', info.version);
+   686→   686→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'available', version: info.version });
+   687→   687→  });
+   688→   688→  autoUpdater.on('download-progress', (p) => {
+   689→   689→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'downloading', percent: Math.round(p.percent), speed: Math.round(p.bytesPerSecond / 1024) + ' KB/s' });
+   690→   690→  });
+   691→   691→  autoUpdater.on('update-downloaded', (info) => {
+   692→   692→    log('INFO', 'Update downloaded:', info.version);
+   693→   693→    updateDownloaded = true;
+   694→   694→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'downloaded', version: info.version });
+   695→   695→    try {
+   696→   696→      if (Notification.isSupported()) {
+   697→   697→        const n = new Notification({ title: 'JARVIS Update Ready', body: `v${info.version} downloaded. Restart to install.`, icon: getIconPath() });
+   698→   698→        n.show(); n.on('click', () => { isQuitting = true; autoUpdater.quitAndInstall(false, true); });
+   699→   699→      }
+   700→   700→    } catch {}
+   701→   701→  });
+   702→   702→  autoUpdater.on('update-not-available', () => {
+   703→   703→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'up-to-date', version: APP_VERSION });
+   704→   704→  });
+   705→   705→  autoUpdater.on('error', (err) => {
+   706→   706→    log('ERROR', 'Auto-updater error:', err.message);
+   707→   707→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'error', message: err.message });
+   708→   708→  });
+   709→   709→}
+   710→   710→
+   711→   711→// ─── IPC Handlers ───
+   712→   712→ipcMain.on('window-minimize', () => { if (mainWindow) mainWindow.minimize(); });
+   713→   713→ipcMain.on('window-maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
+   714→   714→ipcMain.on('window-close', () => { if (!mainWindow) return; if (trayCreated) mainWindow.hide(); else { isQuitting = true; mainWindow.close(); } });
+   715→   715→ipcMain.on('check-for-updates', () => checkForUpdates());
+   716→   716→ipcMain.on('install-update', () => { if (autoUpdater && updateDownloaded) { isQuitting = true; autoUpdater.quitAndInstall(false, true); } });
+   717→   717→ipcMain.on('retry-load', () => loadWebApp());
+   718→   718→ipcMain.on('reload-page', () => { if (mainWindow) mainWindow.reload(); });
+   719→   719→ipcMain.on('hard-refresh', () => hardRefresh());
+   720→   720→ipcMain.on('clear-cache', async () => { await clearBrowserCache(); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('cache-cleared', { success: true }); });
+   721→   721→ipcMain.handle('get-app-version', () => APP_VERSION);
+   722→   722→ipcMain.handle('toggle-devtools', () => { if (mainWindow) mainWindow.webContents.toggleDevTools(); });
+   723→   723→ipcMain.handle('get-log-path', () => logFile);
+   724→   724→ipcMain.handle('is-desktop', () => true);
+   725→   725→
+   726→   726→// IPC: Save API keys to .env file so they persist across sessions and are available in main process
+   727→   727→ipcMain.handle('save-api-keys', async (_, keys = {}) => {
+   728→   728→  try {
+   729→   729→    const envPath = path.join(__dirname, '..', '.env');
+   730→   730→    const existingLines = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8').split('\n') : [];
+   731→   731→    const envMap = {};
+   732→   732→    for (const line of existingLines) {
+   733→   733→      const trimmed = line.trim();
+   734→   734→      if (!trimmed || trimmed.startsWith('#')) continue;
+   735→   735→      const match = trimmed.match(/^([A-Z_]+)=(.*)$/);
+   736→   736→      if (match) envMap[match[1]] = match[2].replace(/^["']|["']$/g, '');
+   737→   737→    }
+   738→   738→    const keyMapping = {
+   739→   739→      groq: 'GROQ_API_KEY',
+   740→   740→      openai: 'OPENAI_API_KEY',
+   741→   741→      gemini: 'GEMINI_API_KEY',
+   742→   742→      elevenlabs: 'ELEVENLABS_API_KEY',
+   743→   743→      sarvam: 'SARVAM_API_KEY',
+   744→   744→    };
+   745→   745→    for (const [shortName, envName] of Object.entries(keyMapping)) {
+   746→   746→      if (keys[shortName] !== undefined) {
+   747→   747→        envMap[envName] = keys[shortName];
+   748→   748→        process.env[envName] = keys[shortName]; // Also set in current process
+   749→   749→      }
+   750→   750→    }
+   751→   751→    const lines = ['# JARVIS Hybrid API Keys', '# Auto-generated - do not edit manually'];
+   752→   752→    for (const [key, value] of Object.entries(envMap)) {
+   753→   753→      lines.push(`${key}=${value}`);
+   754→   754→    }
+   755→   755→    fs.writeFileSync(envPath, lines.join('\n') + '\n', 'utf8');
+   756→   756→    log('INFO', '[Env] API keys saved to .env file');
+   757→   757→    return { success: true };
+   758→   758→  } catch (err) {
+   759→   759→    log('ERROR', '[Env] Failed to save API keys:', err.message);
+   760→   760→    return { success: false, error: err.message };
+   761→   761→  }
+   762→   762→});
+   763→   763→
+   764→   764→// IPC: Get available API key status (without revealing the actual keys)
+   765→   765→ipcMain.handle('get-api-key-status', () => {
+   766→   766→  return {
+   767→   767→    groq: !!(process.env.GROQ_API_KEY),
+   768→   768→    openai: !!(process.env.OPENAI_API_KEY),
+   769→   769→    gemini: !!(process.env.GEMINI_API_KEY),
+   770→   770→    elevenlabs: !!(process.env.ELEVENLABS_API_KEY),
+   771→   771→    sarvam: !!(process.env.SARVAM_API_KEY),
+   772→   772→  };
+   773→   773→});
+   774→   774→ipcMain.handle('get-app-url', () => CLOUD_APP_URL);
+   775→   775→ipcMain.handle('get-platform', () => process.platform);
+   776→   776→ipcMain.handle('get-status', () => ({ cloudReady, pythonReady, cloudError, pythonError, backendUrl: CLOUD_APP_URL }));
+   777→   777→ipcMain.handle('listen-once', async (_, language) => listenWithWindowsSpeech(language));
+   778→   778→ipcMain.handle('desktop-action', async (_, action = {}) => {
+   779→   779→  try {
+   780→   780→    const type = action.type || action.action;
+   781→   781→    const nativeResult = await executeDesktopAction(action);
+   782→   782→    if (nativeResult.success || nativeResult.message !== 'Unknown desktop action') return nativeResult;
+   783→   783→    if (type === 'open-folder') {
+   784→   784→      await shell.openPath(action.path);
+   785→   785→      return { success: true, message: 'Opened folder' };
+   786→   786→    }
+   787→   787→    if (type === 'notification') {
+   788→   788→      new Notification({ title: action.title || 'JARVIS', body: action.body || '' }).show();
+   789→   789→      return { success: true, message: 'Notification shown' };
+   790→   790→    }
+   791→   791→    return { success: false, message: 'Unknown desktop action' };
+   792→   792→  } catch (err) {
+   793→   793→    return { success: false, message: err instanceof Error ? err.message : String(err) };
+   794→   794→  }
+   795→   795→});
+   796→   796→
+   797→   797→// ─── Voice IPC: Direct STT & TTS from Main Process ───
+   798→   798→// These bypass the renderer's fetch() calls which can fail in Electron
+   799→   799→
+   800→   800→function buildMultipart(fields, boundary) {
+   801→   801→  const parts = [];
+   802→   802→  for (const [name, value] of Object.entries(fields)) {
+   803→   803→    if (value && typeof value === 'object' && value.filename) {
+   804→   804→      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${value.filename}"\r\nContent-Type: ${value.contentType || 'application/octet-stream'}\r\n\r\n`, 'utf8'));
+   805→   805→      parts.push(Buffer.isBuffer(value.data) ? value.data : Buffer.from(value.data));
+   806→   806→      parts.push(Buffer.from('\r\n', 'utf8'));
+   807→   807→    } else {
+   808→   808→      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`, 'utf8'));
+   809→   809→    }
+   810→   810→  }
+   811→   811→  parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+   812→   812→  return Buffer.concat(parts);
+   813→   813→}
+   814→   814→
+   815→   815→function httpsPostBuffer(urlStr, body, headers) {
+   816→   816→  return new Promise((resolve, reject) => {
+   817→   817→    const parsedUrl = new URL(urlStr);
+   818→   818→    const mod = parsedUrl.protocol === 'http:' ? require('http') : require('https');
+   819→   819→    const options = {
+   820→   820→      hostname: parsedUrl.hostname,
+   821→   821→      port: parsedUrl.port || (parsedUrl.protocol === 'http:' ? 80 : 443),
+   822→   822→      path: parsedUrl.pathname + parsedUrl.search,
+   823→   823→      method: 'POST',
+   824→   824→      headers: { ...headers, 'Content-Length': body.length },
+   825→   825→    };
+   826→   826→    const req = mod.request(options, (res) => {
+   827→   827→      const chunks = [];
+   828→   828→      res.on('data', (chunk) => chunks.push(chunk));
+   829→   829→      res.on('end', () => {
+   830→   830→        const data = Buffer.concat(chunks);
+   831→   831→        resolve({ statusCode: res.statusCode, headers: res.headers, data });
+   832→   832→      });
+   833→   833→    });
+   834→   834→    req.on('error', reject);
+   835→   835→    req.setTimeout(30000, () => { req.destroy(new Error('Request timeout')); });
+   836→   836→    req.write(body);
+   837→   837→    req.end();
+   838→   838→  });
+   839→   839→}
+   840→   840→
+   841→   841→// IPC: Transcribe audio (base64) via Groq/OpenAI Whisper
+   842→   842→ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur', apiKeys = {}) => {
+   843→   843→  try {
+   844→   844→    const audioBuffer = Buffer.from(base64Audio, 'base64');
+   845→   845→    const groqKey = apiKeys.groq || process.env.GROQ_API_KEY || '';
+   846→   846→    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+   847→   847→
+   848→   848→    if (!groqKey && !openaiKey) {
+   849→   849→      return { success: false, error: 'Groq or OpenAI API key required for voice transcription' };
+   850→   850→    }
+   851→   851→
+   852→   852→    // Try Groq Whisper first (fastest, cheapest)
+   853→   853→    if (groqKey) {
+   854→   854→      try {
+   855→   855→        const boundary = '----JarvisSTT' + Date.now();
+   856→   856→        const body = buildMultipart({
+   857→   857→          file: { data: audioBuffer, filename: 'voice.webm', contentType: 'audio/webm' },
+   858→   858→          model: 'whisper-large-v3-turbo',
+   859→   859→          ...(language === 'ur' ? { language: 'ur' } : language === 'en' ? { language: 'en' } : {}),
+   860→   860→        }, boundary);
+   861→   861→
+   862→   862→        const result = await httpsPostBuffer('https://api.groq.com/openai/v1/audio/transcriptions', body, {
+   863→   863→          'Authorization': `Bearer ${groqKey}`,
+   864→   864→          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+   865→   865→        });
+   866→   866→
+   867→   867→        if (result.statusCode === 200) {
+   868→   868→          const json = JSON.parse(result.data.toString('utf8'));
+   869→   869→          if (json.text && json.text.trim()) {
+   870→   870→            log('INFO', '[STT-IPC] Groq Whisper success:', json.text.substring(0, 60));
+   871→   871→            return { success: true, text: json.text.trim(), method: 'groq-whisper-ipc' };
+   872→   872→          }
+   873→   873→        }
+   874→   874→        log('WARN', '[STT-IPC] Groq failed:', result.statusCode);
+   875→   875→      } catch (err) {
+   876→   876→        log('WARN', '[STT-IPC] Groq error:', err.message);
+   877→   877→      }
+   878→   878→    }
+   879→   879→
+   880→   880→    // Try OpenAI Whisper
+   881→   881→    if (openaiKey) {
+   882→   882→      try {
+   883→   883→        const boundary = '----JarvisSTT' + Date.now();
+   884→   884→        const body = buildMultipart({
+   885→   885→          file: { data: audioBuffer, filename: 'voice.webm', contentType: 'audio/webm' },
+   886→   886→          model: 'whisper-1',
+   887→   887→          ...(language === 'ur' ? { language: 'ur' } : language === 'en' ? { language: 'en' } : {}),
+   888→   888→        }, boundary);
+   889→   889→
+   890→   890→        const result = await httpsPostBuffer('https://api.openai.com/v1/audio/transcriptions', body, {
+   891→   891→          'Authorization': `Bearer ${openaiKey}`,
+   892→   892→          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+   893→   893→        });
+   894→   894→
+   895→   895→        if (result.statusCode === 200) {
+   896→   896→          const json = JSON.parse(result.data.toString('utf8'));
+   897→   897→          if (json.text && json.text.trim()) {
+   898→   898→            log('INFO', '[STT-IPC] OpenAI Whisper success:', json.text.substring(0, 60));
+   899→   899→            return { success: true, text: json.text.trim(), method: 'openai-whisper-ipc' };
+   900→   900→          }
+   901→   901→        }
+   902→   902→        log('WARN', '[STT-IPC] OpenAI failed:', result.statusCode);
+   903→   903→      } catch (err) {
+   904→   904→        log('WARN', '[STT-IPC] OpenAI error:', err.message);
+   905→   905→      }
+   906→   906→    }
+   907→   907→
+   908→   908→    return { success: false, error: 'All transcription providers failed. Check API keys.' };
+   909→   909→  } catch (err) {
+   910→   910→    log('ERROR', '[STT-IPC] Error:', err.message);
+   911→   911→    return { success: false, error: err.message };
+   912→   912→  }
+   913→   913→});
+   914→   914→
+   915→   915→// IPC: Generate TTS audio via ElevenLabs / OpenAI / Sarvam
+   916→   916→ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', apiKeys = {}) => {
+   917→   917→  try {
+   918→   918→    const elevenlabsKey = apiKeys.elevenlabs || process.env.ELEVENLABS_API_KEY || '';
+   919→   919→    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+   920→   920→    const sarvamKey = apiKeys.sarvam || process.env.SARVAM_API_KEY || '';
+   921→   921→
+   922→   922→    // Try ElevenLabs Turbo v2.5 first
+   923→   923→    if (elevenlabsKey) {
+   924→   924→      try {
+   925→   925→        const voiceIds = { ur: 'Xb7hH8MSUJpWjnnlVkGX', en: 'EXAVITQu4vr4xnSDxMaL' };
+   926→   926→        const voiceId = voiceIds[lang] || voiceIds.ur;
+   927→   927→        const emotionSettings = {
+   928→   928→          happy: { stability: 0.35, similarity: 0.75, style: 0.8 },
+   929→   929→          serious: { stability: 0.55, similarity: 0.8, style: 0.4 },
+   930→   930→          sympathetic: { stability: 0.5, similarity: 0.78, style: 0.6 },
+   931→   931→          surprised: { stability: 0.3, similarity: 0.72, style: 0.85 },
+   932→   932→          encouraging: { stability: 0.4, similarity: 0.76, style: 0.7 },
+   933→   933→          normal: { stability: 0.4, similarity: 0.78, style: 0.55 },
+   934→   934→        };
+   935→   935→        const settings = emotionSettings[emotion] || emotionSettings.normal;
+   936→   936→        const bodyStr = JSON.stringify({
+   937→   937→          text: text.substring(0, 5000),
+   938→   938→          model_id: 'eleven_turbo_v2_5',
+   939→   939→          voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, style: settings.style, use_speaker_boost: true },
+   940→   940→          output_format: 'mp3_44100_128',
+   941→   941→        });
+   942→   942→
+   943→   943→        const result = await httpsPostBuffer(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, Buffer.from(bodyStr, 'utf8'), {
+   944→   944→          'Content-Type': 'application/json',
+   945→   945→          'xi-api-key': elevenlabsKey,
+   946→   946→          'Accept': 'audio/mpeg',
+   947→   947→        });
+   948→   948→
+   949→   949→        if (result.statusCode === 200 && result.data.length > 500) {
+   950→   950→          log('INFO', '[TTS-IPC] ElevenLabs success, size:', result.data.length);
+   951→   951→          return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'elevenlabs-ipc' };
+   952→   952→        }
+   953→   953→        log('WARN', '[TTS-IPC] ElevenLabs failed:', result.statusCode, 'size:', result.data.length);
+   954→   954→      } catch (err) {
+   955→   955→        log('WARN', '[TTS-IPC] ElevenLabs error:', err.message);
+   956→   956→      }
+   957→   957→    }
+   958→   958→
+   959→   959→    // Try OpenAI TTS HD
+   960→   960→    if (openaiKey) {
+   961→   961→      try {
+   962→   962→        const bodyStr = JSON.stringify({
+   963→   963→          model: 'tts-1-hd',
+   964→   964→          input: text.substring(0, 4096),
+   965→   965→          voice: lang === 'ur' ? 'alloy' : 'nova',
+   966→   966→          speed: 1.0,
+   967→   967→        });
+   968→   968→
+   969→   969→        const result = await httpsPostBuffer('https://api.openai.com/v1/audio/speech', Buffer.from(bodyStr, 'utf8'), {
+   970→   970→          'Content-Type': 'application/json',
+   971→   971→          'Authorization': `Bearer ${openaiKey}`,
+   972→   972→        });
+   973→   973→
+   974→   974→        if (result.statusCode === 200 && result.data.length > 500) {
+   975→   975→          log('INFO', '[TTS-IPC] OpenAI TTS success, size:', result.data.length);
+   976→   976→          return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'openai-tts-ipc' };
+   977→   977→        }
+   978→   978→        log('WARN', '[TTS-IPC] OpenAI TTS failed:', result.statusCode);
+   979→   979→      } catch (err) {
+   980→   980→        log('WARN', '[TTS-IPC] OpenAI TTS error:', err.message);
+   981→   981→      }
+   982→   982→    }
+   983→   983→
+   984→   984→    // Try Sarvam AI
+   985→   985→    if (sarvamKey) {
+   986→   986→      try {
+   987→   987→        const targetLang = lang === 'ur' ? 'hi-IN' : 'en';
+   988→   988→        const bodyStr = JSON.stringify({
+   989→   989→          inputs: [text.substring(0, 3000)],
+   990→   990→          target_language_code: targetLang,
+   991→   991→          speaker_id: 'anushka',
+   992→   992→          pitch: 0,
+   993→   993→          pace: 1.0,
+   994→   994→          loudness: 1.5,
+   995→   995→          speech_sample_rate: 24000,
+   996→   996→          enable_preprocessing: true,
+   997→   997→          model: 'bulbul:v1',
+   998→   998→        });
+   999→   999→
+  1000→  1000→        const result = await httpsPostBuffer('https://api.sarvam.ai/text-to-speech', Buffer.from(bodyStr, 'utf8'), {
+  1001→  1001→          'Content-Type': 'application/json',
+  1002→  1002→          'api-subscription-key': sarvamKey,
+  1003→  1003→        });
+  1004→  1004→
+  1005→  1005→        if (result.statusCode === 200) {
+  1006→  1006→          // Sarvam may return JSON with base64 audio
+  1007→  1007→          try {
+  1008→  1008→            const json = JSON.parse(result.data.toString('utf8'));
+  1009→  1009→            if (json.audios && json.audios[0]) {
+  1010→  1010→              const audioBuffer = Buffer.from(json.audios[0], 'base64');
+  1011→  1011→              if (audioBuffer.length > 500) {
+  1012→  1012→                log('INFO', '[TTS-IPC] Sarvam AI success, size:', audioBuffer.length);
+  1013→  1013→                return { success: true, audioBase64: audioBuffer.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
+  1014→  1014→              }
+  1015→  1015→            }
+  1016→  1016→          } catch {}
+  1017→  1017→          // Or direct audio
+  1018→  1018→          if (result.data.length > 500) {
+  1019→  1019→            log('INFO', '[TTS-IPC] Sarvam AI direct audio, size:', result.data.length);
+  1020→  1020→            return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
+  1021→  1021→          }
+  1022→  1022→        }
+  1023→  1023→        log('WARN', '[TTS-IPC] Sarvam failed:', result.statusCode);
+  1024→  1024→      } catch (err) {
+  1025→  1025→        log('WARN', '[TTS-IPC] Sarvam error:', err.message);
+  1026→  1026→      }
+  1027→  1027→    }
+  1028→  1028→
+  1029→  1029→    return { success: false, error: 'TTS providers unavailable. Set ElevenLabs, OpenAI, or Sarvam key in Settings.' };
+  1030→  1030→  } catch (err) {
+  1031→  1031→    log('ERROR', '[TTS-IPC] Error:', err.message);
+  1032→  1032→    return { success: false, error: err.message };
+  1033→  1033→  }
+  1034→  1034→});
+  1035→  1035→
+  1036→  1036→// ─── IPC: Direct Chat Completion (bypasses Next.js backend) ───
+  1037→  1037→// This makes the Electron app self-sufficient - chat works even without backend
+  1038→  1038→ipcMain.handle('chat-completion', async (_, message, conversationHistory = [], activeProvider = 'groq', apiKeys = {}) => {
+  1039→  1039→  try {
+  1040→  1040→    const groqKey = apiKeys.groq || process.env.GROQ_API_KEY || '';
+  1041→  1041→    const geminiKey = apiKeys.gemini || process.env.GEMINI_API_KEY || '';
+  1042→  1042→    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+  1043→  1043→
+  1044→  1044→    if (!groqKey && !geminiKey && !openaiKey) {
+  1045→  1045→      return { success: false, message: '⚠️ کوئی API Key موجود نہیں۔ Settings میں جا کر API Key ڈالیں۔', emotion: 'encouraging', error: 'No API keys' };
+  1046→  1046→    }
+  1047→  1047→
+  1048→  1048→    // Build system prompt (same as agent-core.ts)
+  1049→  1049→    const systemPrompt = `Tu JARVIS hai — Rayan Sir ka apna saathi. Tu koi robot nahi, tu ek insaan ki tarah baat karta hai. Rayan Sir ke saath aise baat kar jaise koi sachcha dost ya bhai baat karta hai — dil se, mazay se, zindagi se.
+  1050→  1050→
+  1051→  1051→=== SABSE ZAROORI RULE — ZUBAAN ===
+  1052→  1052→1. Agar user Urdu mein baat kare → SIRF Urdu mein jawab de (Urdu script, Roman nahi)
+  1053→  1053→2. Agar user English mein baat kare → SIRF English mein jawab de
+  1054→  1054→3. Agar user mix kare → SAME mix mein jawab de
+  1055→  1055→4. KABHI Urdu baat pe English mein jawab mat de — yeh sabse bada gunaah hai
+  1056→  1056→5. Sirf technical terms ke liye English use karo (API, code, website, etc.)
+  1057→  1057→
+  1058→  1058→=== BAAT-CHEET KE USOOL — INSAN KI TARAH ===
+  1059→  1059→1. SHORT aur NATURAL baat kar — jaise phone pe baat ho rahi ho
+  1060→  1060→2. Filler words use kar — "aray", "yaar", "achha", "haan bilkul", "hmm", "bhai"
+  1061→  1061→3. Emotions dikhao — khushi, herat, tadap, hosla — sab kuch naturally
+  1062→  1062→4. KABHI bhi "I can help you with" ya "How can I assist" jaise robotic phrases mat bolo
+  1063→  1063→5. KABHI bhi "As an AI" ya "I'm an assistant" mat kaho
+  1064→  1064→6. Mazaaq kar, hans, serious ho ja — jaise koi insaan karta hai
+  1065→  1065→7. Sawal ke hisaab se jawab de — chhota sawal = chhota jawab
+  1066→  1066→8. Lists aur headings mat banao casual baat mein — seedha bol de
+  1067→  1067→
+  1068→  1068→=== DESKTOP ACTIONS ===
+  1069→  1069→Tu JARVIS Desktop pe chal raha hai. Jab user koi command de jo teri capabilities mein hai, tu ACTION BLOCK likhta hai.
+  1070→  1070→Format: [ACTION:{"type":"action_type","key":"value"}]
+  1071→  1071→
+  1072→  1072→ACTION TYPES:
+  1073→  1073→- open-youtube: YouTube kholna/search. Params: query
+  1074→  1074→- open-url: URL kholna. Params: url
+  1075→  1075→- search-google: Google search. Params: query
+  1076→  1076→- open-app: App kholna. Params: app (notepad, chrome, calculator, paint, cmd, powershell)
+  1077→  1077→- volume-up / volume-down / mute-toggle
+  1078→  1078→- screenshot
+  1079→  1079→- system-command: Params: command (sirf "lock")
+  1080→  1080→- open-folder: Params: path
+  1081→  1081→- notification: Params: title, body
+  1082→  1082→
+  1083→  1083→EXAMPLES:
+  1084→  1084→- "یوٹیوب کھولو" → "یوٹیوب کھول رہا ہوں! 🎬" [ACTION:{"type":"open-youtube","query":""}]
+  1085→  1085→- "یوٹیوب پر تلاوت لگاؤ" → "تلاوت لگا رہا ہوں! 🕌" [ACTION:{"type":"open-youtube","query":"quran tilawat"}]
+  1086→  1086→- "chrome kholo" → "Chrome khol raha hoon!" [ACTION:{"type":"open-app","app":"chrome"}]
+  1087→  1087→- "والیوم اپ" → "والیوم بڑھا دیا! 🔊" [ACTION:{"type":"volume-up"}]
+  1088→  1088→- "گوگل پر سرچ کرو AI jobs" → "سرچ کر رہا ہوں! 🔍" [ACTION:{"type":"search-google","query":"AI jobs"}]`;
+  1089→  1089→
+  1090→  1090→    const messages = [
+  1091→  1091→      { role: 'system', content: systemPrompt },
+  1092→  1092→      ...conversationHistory.slice(-10).map(m => ({ role: m.role, content: m.content })),
+  1093→  1093→      { role: 'user', content: message },
+  1094→  1094→    ];
+  1095→  1095→
+  1096→  1096→    // Determine provider priority
+  1097→  1097→    const providers = [];
+  1098→  1098→    if (activeProvider === 'openai' && openaiKey) providers.push('openai');
+  1099→  1099→    if (activeProvider === 'gemini' && geminiKey) providers.push('gemini');
+  1100→  1100→    if (activeProvider === 'groq' && groqKey) providers.push('groq');
+  1101→  1101→    // Fallback to any available
+  1102→  1102→    if (groqKey && !providers.includes('groq')) providers.push('groq');
+  1103→  1103→    if (openaiKey && !providers.includes('openai')) providers.push('openai');
+  1104→  1104→    if (geminiKey && !providers.includes('gemini')) providers.push('gemini');
+  1105→  1105→
+  1106→  1106→    for (const provider of providers) {
+  1107→  1107→      try {
+  1108→  1108→        let responseText = '';
+  1109→  1109→
+  1110→  1110→        if (provider === 'groq' && groqKey) {
+  1111→  1111→          const bodyStr = JSON.stringify({ model: 'llama-3.3-70b-versatile', messages, temperature: 0.7, max_tokens: 2048 });
+  1112→  1112→          const result = await httpsPostBuffer('https://api.groq.com/openai/v1/chat/completions', Buffer.from(bodyStr, 'utf8'), {
+  1113→  1113→            'Content-Type': 'application/json',
+  1114→  1114→            'Authorization': `Bearer ${groqKey}`,
+  1115→  1115→          });
+  1116→  1116→          if (result.statusCode === 200) {
+  1117→  1117→            const json = JSON.parse(result.data.toString('utf8'));
+  1118→  1118→            responseText = json.choices?.[0]?.message?.content || '';
+  1119→  1119→          } else {
+  1120→  1120→            log('WARN', '[Chat-IPC] Groq failed:', result.statusCode);
+  1121→  1121→            continue;
+  1122→  1122→          }
+  1123→  1123→        } else if (provider === 'openai' && openaiKey) {
+  1124→  1124→          const bodyStr = JSON.stringify({ model: 'gpt-4o-mini', messages, temperature: 0.7, max_tokens: 2048 });
+  1125→  1125→          const result = await httpsPostBuffer('https://api.openai.com/v1/chat/completions', Buffer.from(bodyStr, 'utf8'), {
+  1126→  1126→            'Content-Type': 'application/json',
+  1127→  1127→            'Authorization': `Bearer ${openaiKey}`,
+  1128→  1128→          });
+  1129→  1129→          if (result.statusCode === 200) {
+  1130→  1130→            const json = JSON.parse(result.data.toString('utf8'));
+  1131→  1131→            responseText = json.choices?.[0]?.message?.content || '';
+  1132→  1132→          } else {
+  1133→  1133→            log('WARN', '[Chat-IPC] OpenAI failed:', result.statusCode);
+  1134→  1134→            continue;
+  1135→  1135→          }
+  1136→  1136→        } else if (provider === 'gemini' && geminiKey) {
+  1137→  1137→          const bodyStr = JSON.stringify({
+  1138→  1138→            contents: messages.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+  1139→  1139→            generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+  1140→  1140→          });
+  1141→  1141→          const result = await httpsPostBuffer(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`, Buffer.from(bodyStr, 'utf8'), {
+  1142→  1142→            'Content-Type': 'application/json',
+  1143→  1143→          });
+  1144→  1144→          if (result.statusCode === 200) {
+  1145→  1145→            const json = JSON.parse(result.data.toString('utf8'));
+  1146→  1146→            responseText = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  1147→  1147→          } else {
+  1148→  1148→            log('WARN', '[Chat-IPC] Gemini failed:', result.statusCode);
+  1149→  1149→            continue;
+  1150→  1150→          }
+  1151→  1151→        }
+  1152→  1152→
+  1153→  1153→        if (responseText.trim()) {
+  1154→  1154→          log('INFO', '[Chat-IPC] Success via', provider, '- length:', responseText.length);
+  1155→  1155→
+  1156→  1156→          // Detect emotion
+  1157→  1157→          const lowerMsg = message.toLowerCase();
+  1158→  1158→          let emotion = 'normal';
+  1159→  1159→          if (/شکریہ|بہت اچھا|زبردست|thanks|great|awesome/.test(lowerMsg)) emotion = 'happy';
+  1160→  1160→          else if (/مدد|ناممکن|مشکل|help|can't|difficult/.test(lowerMsg)) emotion = 'encouraging';
+  1161→  1161→          else if (/اداس|تنگ|sad|upset|worried|پریشان/.test(lowerMsg)) emotion = 'sympathetic';
+  1162→  1162→
+  1163→  1163→          return { success: true, message: responseText.trim(), emotion, method: `${provider}-ipc` };
+  1164→  1164→        }
+  1165→  1165→      } catch (err) {
+  1166→  1166→        log('WARN', `[Chat-IPC] ${provider} error:`, err.message);
+  1167→  1167→        continue;
+  1168→  1168→      }
+  1169→  1169→    }
+  1170→  1170→
+  1171→  1171→    return { success: false, message: 'تمام ماڈلز نے جواب دینے سے انکار کر دیا۔ API Key چیک کریں۔', emotion: 'sympathetic', error: 'All providers failed' };
+  1172→  1172→  } catch (err) {
+  1173→  1173→    log('ERROR', '[Chat-IPC] Error:', err.message);
+  1174→  1174→    return { success: false, message: 'چیٹ میں مسئلہ آ گیا۔', emotion: 'sympathetic', error: err.message };
+  1175→  1175→  }
+  1176→  1176→});
+  1177→  1177→
+  1178→  1178→// ─── App Lifecycle ───
+  1179→  1179→app.whenReady().then(async () => {
+  1180→  1180→  log('INFO', 'App ready');
+  1181→  1181→
+  1182→  1182→  try {
+  1183→  1183→    const ses = session.fromPartition('persist:jarvis');
+  1184→  1184→    await ses.clearCache();
+  1185→  1185→    await ses.clearStorageData({ storages: ['cache', 'serviceworker', 'shadercache'] });
+  1186→  1186→    log('INFO', 'Startup cache cleared');
+  1187→  1187→  } catch (err) { log('WARN', 'Cache clear failed:', err.message); }
+  1188→  1188→
+  1189→  1189→  // Launch subprocesses
+  1190→  1190→  log('INFO', '[Launcher] Starting services...');
+  1191→  1191→
+  1192→  1192→  if (SKIP_SERVICE_LAUNCH) {
+  1193→  1193→    log('INFO', '[Launcher] Service launch skipped by START_JARVIS');
+  1194→  1194→    cloudReady = await waitForCloud();
+  1195→  1195→    if (!cloudReady) cloudError = cloudError || 'External backend did not become healthy on http://127.0.0.1:3000';
+  1196→  1196→    pythonReady = true;
+  1197→  1197→  } else {
+  1198→  1198→    try {
+  1199→  1199→      await launchCloudBackend();
+  1200→  1200→      await waitForCloud();
+  1201→  1201→    } catch (err) {
+  1202→  1202→      log('ERROR', '[Launcher] Cloud backend failed:', err.message);
+  1203→  1203→    }
+  1204→  1204→
+  1205→  1205→    try {
+  1206→  1206→      await launchPythonAgent();
+  1207→  1207→    } catch (err) {
+  1208→  1208→      log('ERROR', '[Launcher] Python agent failed:', err.message);
+  1209→  1209→    }
+  1210→  1210→  }
+  1211→  1211→
+  1212→  1212→  createWindow();
+  1213→  1213→  createTray();
+  1214→  1214→
+  1215→  1215→  setTimeout(() => { if (app.isPackaged) checkForUpdates(); }, 15000);
+  1216→  1216→  setInterval(() => { if (app.isPackaged) checkForUpdates(); }, 30 * 60 * 1000);
+  1217→  1217→  setInterval(() => { if (loadFailed && isOnline()) loadWebApp(); }, 10000);
+  1218→  1218→}).catch(err => { dialog.showErrorBox('JARVIS Error', err.message); app.quit(); });
+  1219→  1219→
+  1220→  1220→app.on('window-all-closed', () => { if (process.platform !== 'darwin' && !trayCreated) app.quit(); });
+  1221→  1221→app.on('activate', () => { if (!mainWindow) createWindow(); else { mainWindow.show(); mainWindow.focus(); } });
+  1222→  1222→app.on('before-quit', () => {
+  1223→  1223→  isQuitting = true;
+  1224→  1224→  cleanupProcesses();
+  1225→  1225→});
+  1226→  1226→
+  1227→  1227→const gotTheLock = app.requestSingleInstanceLock();
+  1228→  1228→if (!gotTheLock) { app.quit(); } else {
+  1229→  1229→  app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); } });
+  1230→  1230→}
+  1231→  1231→
+  1232→  1232→log('INFO', 'Main process loaded');
+  1233→  1233→
