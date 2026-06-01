@@ -1,11 +1,15 @@
 // JARVIS Hybrid - Agent Core
 // Main orchestrator - accepts API keys per-request for multi-user support
+// Includes: FreelanceAgent, WhatsAppAgent, TaskManager for autonomous tasks
 
 import { LLMRouter } from "./llm-router";
 import { MemoryManager } from "./memory";
 import { BrowserAgent } from "./sub-agents/browser-agent";
 import { ProductHunterAgent } from "./sub-agents/product-hunter";
 import { CodeAgent } from "./sub-agents/code-agent";
+import { FreelanceAgent } from "./sub-agents/freelance-agent";
+import { WhatsAppAgent } from "./sub-agents/whatsapp-agent";
+import { TaskManager } from "./sub-agents/task-manager";
 import type {
   AgentResponse,
   EmotionType,
@@ -58,6 +62,21 @@ export class AgentCore {
         case "code": {
           const codeAgent = new CodeAgent(llmRouter);
           response = await codeAgent.handle(classification.action, classification.params, userMessage);
+          break;
+        }
+        case "freelance": {
+          const freelanceAgent = new FreelanceAgent(llmRouter);
+          response = await freelanceAgent.handle(classification.action, classification.params);
+          break;
+        }
+        case "whatsapp": {
+          const whatsappAgent = new WhatsAppAgent(llmRouter);
+          response = await whatsappAgent.handle(classification.action, classification.params);
+          break;
+        }
+        case "task_manager": {
+          const taskManager = new TaskManager(llmRouter);
+          response = await taskManager.handle(classification.action, classification.params);
           break;
         }
         case "windows":
@@ -126,8 +145,9 @@ export class AgentCore {
       return { stream, classification, emotion };
     }
 
-    // Sub-agents
-    if (classification.agent !== "general") {
+    // Sub-agents (non-streaming — they return full responses)
+    const subAgentTypes = ["browser", "product_hunter", "code", "freelance", "whatsapp", "task_manager"];
+    if (subAgentTypes.includes(classification.agent)) {
       let responseText = "";
       try {
         switch (classification.agent) {
@@ -146,6 +166,24 @@ export class AgentCore {
           case "code": {
             const agent = new CodeAgent(llmRouter);
             const resp = await agent.handle(classification.action, classification.params, userMessage);
+            responseText = resp.message;
+            break;
+          }
+          case "freelance": {
+            const agent = new FreelanceAgent(llmRouter);
+            const resp = await agent.handle(classification.action, classification.params);
+            responseText = resp.message;
+            break;
+          }
+          case "whatsapp": {
+            const agent = new WhatsAppAgent(llmRouter);
+            const resp = await agent.handle(classification.action, classification.params);
+            responseText = resp.message;
+            break;
+          }
+          case "task_manager": {
+            const agent = new TaskManager(llmRouter);
+            const resp = await agent.handle(classification.action, classification.params);
             responseText = resp.message;
             break;
           }
@@ -232,6 +270,16 @@ CONVERSATION STYLE: ${emotionConfig.style}
 - Don't write essays — be concise
 - If user says "kaise ho" / "کیسے ہو" — respond naturally like a friend would
 
+=== AUTONOMOUS CAPABILITIES ===
+You have special agents for specific tasks:
+- **Freelance Agent**: Generate proposals, analyze jobs, negotiate, cover letters, pricing strategy
+- **WhatsApp Agent**: Draft messages, auto-replies, negotiation chats, follow-ups
+- **Task Manager**: Plan and execute complex multi-step tasks autonomously
+- **Browser Agent**: Web search and research
+- **Code Agent**: Write, debug, and review code
+
+When user asks for freelancing help, job applications, proposals, WhatsApp messages, etc. — use the appropriate agent automatically.
+
 === FILE ANALYSIS ===
 - If user uploads a file/image, analyze it thoroughly
 - Describe images, extract text from documents, analyze code
@@ -242,6 +290,8 @@ CONVERSATION STYLE: ${emotionConfig.style}
 - Web search & product research (cloud)
 - Code writing & debugging (cloud)
 - File & image analysis (cloud)
+- Freelancing: proposals, job analysis, negotiation (cloud)
+- WhatsApp: message drafting, auto-replies, chat strategy (cloud)
 - Desktop control via local agent (screenshots, files, uploads)
 
 You are a hybrid system — cloud brain + desktop hands.`;

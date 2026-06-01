@@ -337,14 +337,18 @@ export default function ChatPage() {
           // Call OUR server-side TTS endpoint (no CORS!)
           // Pass ElevenLabs key if available for natural voice
           const elevenlabsKey = localStorage.getItem("jarvis_elevenlabs_key") || "";
+          const openaiKey = localStorage.getItem("jarvis_openai_tts_key") ||
+            (localStorage.getItem("jarvis_api_keys") ?
+              JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") || "";
           const res = await fetch("/api/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              text: chunk.substring(0, 200),
+              text: chunk.substring(0, 500),
               lang: "ur",
               emotion: emotion,
               elevenlabsKey: elevenlabsKey || undefined,
+              openaiKey: openaiKey || undefined,
             }),
           });
 
@@ -414,16 +418,25 @@ export default function ChatPage() {
       // PRIMARY: Server-side TTS (no CORS issues!)
       speakUrduServer(cleanText, emotion, onDone);
     } else {
-      const voices = window.speechSynthesis.getVoices();
-      const selectedVoice = voices.find(v =>
-        v.lang.startsWith("en") && v.name.includes("Google") && !v.localService
-      ) || voices.find(v =>
-        v.lang.startsWith("en-US") && v.name.includes("Google")
-      ) || voices.find(v =>
-        v.lang.startsWith("en") && v.name.includes("Google")
-      ) || voices.find(v => v.lang.startsWith("en-US")) ||
-        voices.find(v => v.lang.startsWith("en")) || null;
-      speakWithBrowser(cleanText, "en", emotion, selectedVoice, onDone);
+      // English: Try OpenAI TTS via server first (if key available), then browser
+      const openaiKey = localStorage.getItem("jarvis_openai_tts_key") ||
+        (localStorage.getItem("jarvis_api_keys") ?
+          JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") || "";
+      if (openaiKey) {
+        // Use server-side OpenAI TTS for natural English voice too
+        speakUrduServer(cleanText, emotion, onDone);
+      } else {
+        const voices = window.speechSynthesis.getVoices();
+        const selectedVoice = voices.find(v =>
+          v.lang.startsWith("en") && v.name.includes("Google") && !v.localService
+        ) || voices.find(v =>
+          v.lang.startsWith("en-US") && v.name.includes("Google")
+        ) || voices.find(v =>
+          v.lang.startsWith("en") && v.name.includes("Google")
+        ) || voices.find(v => v.lang.startsWith("en-US")) ||
+          voices.find(v => v.lang.startsWith("en")) || null;
+        speakWithBrowser(cleanText, "en", emotion, selectedVoice, onDone);
+      }
     }
   }, [cancelAllSpeech, speakUrduServer]);
 
@@ -670,9 +683,9 @@ export default function ChatPage() {
 
   const quickActions = [
     { icon: "🎙️", text: "Voice Chat", prompt: "", isConvMode: true },
-    { icon: "🔍", text: "Search the web", prompt: "Search for latest tech news" },
-    { icon: "💻", text: "Write code", prompt: "Write a Python web scraper" },
-    { icon: "📊", text: "Analyze market", prompt: "Analyze the market for AI tools" },
+    { icon: "📝", text: "Generate Proposal", prompt: "Generate a winning freelance proposal for me" },
+    { icon: "💬", text: "WhatsApp Reply", prompt: "Help me draft a professional WhatsApp reply" },
+    { icon: "🔍", text: "Analyze a Job", prompt: "Analyze this job posting and give me a strategy" },
   ];
 
   const emotionEmojis: Record<EmotionType, string> = {
@@ -747,7 +760,7 @@ export default function ChatPage() {
             <div className="welcome-logo">🤖</div>
             <h1 className="welcome-title">JARVIS</h1>
             <p className="welcome-subtitle">
-              آپ کا ذاتی AI اسسٹنٹ — بولیں، سنیں، کام کریں
+              آپ کا ذاتی AI اسسٹنٹ — بولیں، سنیں، فری لانسنگ، واٹس ایپ، کام کریں
             </p>
 
             {!hasAnyKey ? (
@@ -868,6 +881,7 @@ export default function ChatPage() {
           <span>
             {hasAnyKey ? providerLabels[activeProvider] : "⚠️ No Key"}
             {conversationMode ? " · 🎙️ Voice Chat ON" : " · 🎧 = voice chat"}
+            {" · 📝 Freelance · 💬 WhatsApp"}
           </span>
           <span>Enter to send</span>
         </div>
@@ -966,17 +980,34 @@ function SettingsPanel({
         <div style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color)" }}>
           <h3 style={{ fontSize: "15px", fontWeight: 600, marginBottom: "12px" }}>🎙️ Natural Voice (TTS)</h3>
           <p style={{ color: "var(--text-muted)", fontSize: "12px", marginBottom: "16px" }}>
-            ElevenLabs key ڈالیں تو بالکل نیچرل انسانی آواز آئے گی۔ بغیر key کے Google TTS استعمال ہوگا۔
+            نیچرل آواز کے لیے: OpenAI key (آپ کی موجودہ key) یا ElevenLabs key ڈالیں۔ بغیر key کے Google TTS استعمال ہوگا (روبوٹک)۔
           </p>
-          <div className="provider-card" style={{ borderColor: elevenlabsKey ? "rgba(34,197,94,0.3)" : undefined }}>
+
+          {/* OpenAI TTS - auto-uses existing key */}
+          <div className="provider-card" style={{
+            borderColor: (localKeys.openai || localStorage.getItem("jarvis_api_keys") ?
+              JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") ? "rgba(34,197,94,0.3)" : undefined
+          }}>
             <div className="provider-header">
-              <span className="provider-name">🆓 ElevenLabs (Natural Voice)</span>
+              <span className="provider-name">🎵 OpenAI TTS (Natural Voice)</span>
+              {(localKeys.openai || localStorage.getItem("jarvis_api_keys") ?
+                JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") && <span className="provider-saved">✅ Auto</span>}
+            </div>
+            <p style={{ color: "var(--text-muted)", fontSize: "11px", margin: "6px 0 8px" }}>
+              آپ کی OpenAI API key خودکار استعمال ہوگی — الگ سے کرنے کی ضرورت نہیں!
+            </p>
+          </div>
+
+          {/* ElevenLabs */}
+          <div className="provider-card" style={{ borderColor: elevenlabsKey ? "rgba(34,197,94,0.3)" : undefined, marginTop: "10px" }}>
+            <div className="provider-header">
+              <span className="provider-name">🆓 ElevenLabs (Best Urdu Voice)</span>
               {elevenlabsKey && <span className="provider-saved">✅</span>}
             </div>
             <input type="password" className="provider-input"
               value={elevenlabsKey}
               onChange={(e) => setElevenlabsKey(e.target.value)}
-              placeholder="xi_... (free tier available)" />
+              placeholder="xi_... (free tier: 10,000 chars/month)" />
             <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer" className="provider-link">
               Free API Key لیں →
             </a>

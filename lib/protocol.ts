@@ -26,7 +26,10 @@ export type AgentType =
   | "file"
   | "product_hunter"
   | "code"
-  | "upload";
+  | "upload"
+  | "freelance"
+  | "whatsapp"
+  | "task_manager";
 
 export interface TaskClassification {
   agent: AgentType;

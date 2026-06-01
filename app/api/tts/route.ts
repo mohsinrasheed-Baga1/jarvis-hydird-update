@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 // ===== JARVIS TTS API =====
-// Priority: ElevenLabs (natural) → Google Cloud Neural → Google Translate
+// Priority: ElevenLabs (natural) → OpenAI TTS (natural) → Google Translate (free)
 // Supports both Urdu and English with natural, emotional voices
 
 interface TTSRequest {
@@ -10,6 +10,7 @@ interface TTSRequest {
   emotion?: string;
   voiceId?: string;
   elevenlabsKey?: string;
+  openaiKey?: string;
 }
 
 // ===== ELEVENLABS — Most Natural Voice =====
@@ -77,6 +78,63 @@ async function tryElevenLabs(
     return null;
   } catch (err) {
     console.warn("[TTS] ElevenLabs failed:", err);
+    return null;
+  }
+}
+
+// ===== OPENAI TTS — Natural Voice (uses existing OpenAI key!) =====
+async function tryOpenAITTS(
+  text: string,
+  lang: string,
+  emotion: string,
+  apiKey?: string
+): Promise<Response | null> {
+  if (!apiKey) return null;
+
+  // OpenAI TTS voices - alloy is great for multilingual
+  const voiceMap: Record<string, string> = {
+    happy: "nova",       // Upbeat, friendly
+    serious: "onyx",     // Deep, authoritative
+    sympathetic: "shimmer", // Warm, gentle
+    surprised: "fable",  // Expressive
+    encouraging: "nova",  // Friendly, uplifting
+    normal: "alloy",     // Neutral, clear
+  };
+
+  const voice = lang === "ur" ? "alloy" : (voiceMap[emotion] || "alloy");
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "tts-1-hd",
+        input: text.substring(0, 4096),
+        voice: voice,
+        speed: emotion === "happy" || emotion === "surprised" ? 1.1 : emotion === "serious" ? 0.9 : 1.0,
+      }),
+    });
+
+    if (response.ok) {
+      const audioBuffer = await response.arrayBuffer();
+      if (audioBuffer.byteLength > 500) {
+        console.log(`[TTS] OpenAI TTS success, size: ${audioBuffer.byteLength}`);
+        return new NextResponse(audioBuffer, {
+          headers: {
+            "Content-Type": "audio/mpeg",
+            "Cache-Control": "public, max-age=3600",
+            "X-TTS-Provider": "openai",
+          },
+        });
+      }
+    }
+    console.warn("[TTS] OpenAI TTS response not ok");
+    return null;
+  } catch (err) {
+    console.warn("[TTS] OpenAI TTS failed:", err);
     return null;
   }
 }
@@ -182,7 +240,7 @@ async function tryStreamElements(
 export async function POST(req: NextRequest) {
   try {
     const body: TTSRequest = await req.json();
-    const { text, lang = "ur", emotion = "normal", elevenlabsKey } = body;
+    const { text, lang = "ur", emotion = "normal", elevenlabsKey, openaiKey } = body;
 
     if (!text || !text.trim()) {
       return NextResponse.json({ error: "No text provided" }, { status: 400 });
@@ -194,11 +252,17 @@ export async function POST(req: NextRequest) {
       if (result) return result;
     }
 
-    // Priority 2: Google Translate TTS (free, decent quality)
+    // Priority 2: OpenAI TTS (natural, uses existing OpenAI key!)
+    if (openaiKey) {
+      const result = await tryOpenAITTS(text, lang, emotion, openaiKey);
+      if (result) return result;
+    }
+
+    // Priority 3: Google Translate TTS (free, decent quality)
     const googleResult = await tryGoogleTranslate(text, lang);
     if (googleResult) return googleResult;
 
-    // Priority 3: StreamElements (free alternative)
+    // Priority 4: StreamElements (free alternative)
     const streamResult = await tryStreamElements(text, lang);
     if (streamResult) return streamResult;
 
