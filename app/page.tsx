@@ -6,15 +6,12 @@ import type { EmotionType, JarvisMessage, APIKeys, LLMProvider } from "@/lib/pro
 // ============== MAIN CHAT PAGE ==============
 
 export default function ChatPage() {
-  // Load API keys from localStorage
   const loadApiKeys = (): APIKeys => {
     if (typeof window === "undefined") return {};
     try {
       const saved = localStorage.getItem("jarvis_api_keys");
       return saved ? JSON.parse(saved) : {};
-    } catch {
-      return {};
-    }
+    } catch { return {}; }
   };
 
   const loadActiveProvider = (): LLMProvider => {
@@ -34,11 +31,19 @@ export default function ChatPage() {
   const [activeProvider, setActiveProvider] = useState<LLMProvider>(loadActiveProvider);
   const [userId] = useState(() => `user_${Date.now()}`);
 
+  // ===== CONVERSATION MODE STATE =====
+  const [conversationMode, setConversationMode] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const conversationModeRef = useRef(false);
+  const isSpeakingRef = useRef(false);
+  const isLoadingRef = useRef(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const recognitionRef = useRef<any>(null);
+  const synthUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
-  // Save API keys to localStorage
   const saveApiKeys = useCallback((keys: APIKeys) => {
     setApiKeys(keys);
     localStorage.setItem("jarvis_api_keys", JSON.stringify(keys));
@@ -49,44 +54,214 @@ export default function ChatPage() {
     localStorage.setItem("jarvis_active_provider", provider);
   }, []);
 
-  // Check if any key is configured
   const hasAnyKey = Object.values(apiKeys).some((k) => k && k.trim().length > 0);
+
+  // Sync refs with state
+  useEffect(() => { conversationModeRef.current = conversationMode; }, [conversationMode]);
+  useEffect(() => { isLoadingRef.current = isLoading; }, [isLoading]);
 
   // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, streamingContent]);
 
-  // Check health + key status on mount
+  // Check health
   useEffect(() => {
     const checkHealth = async () => {
       try {
         const res = await fetch("/api/health");
-        const data = await res.json();
-        if (hasAnyKey) {
-          setConnectionStatus("online");
-        } else {
-          setConnectionStatus("nokey");
-        }
-      } catch {
-        setConnectionStatus("offline");
-      }
+        await res.json();
+        setConnectionStatus(hasAnyKey ? "online" : "nokey");
+      } catch { setConnectionStatus("offline"); }
     };
     checkHealth();
   }, [hasAnyKey]);
 
   // Show settings on first visit if no keys
   useEffect(() => {
-    if (!hasAnyKey) {
-      setShowSettings(true);
+    if (!hasAnyKey) setShowSettings(true);
+  }, []);
+
+  // Load voices on mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.getVoices();
+      window.speechSynthesis.onvoiceschanged = () => {
+        window.speechSynthesis.getVoices();
+      };
     }
   }, []);
 
-  // Send message
-  const sendMessage = useCallback(async (text: string) => {
-    if (!text.trim() || isLoading) return;
+  // ===== DETECT LANGUAGE FROM TEXT =====
+  const detectLanguage = (text: string): "ur" | "en" | "mixed" => {
+    const urduChars = text.match(/[\u0600-\u06FF]/g);
+    const urduCount = urduChars ? urduChars.length : 0;
+    const ratio = urduCount / text.length;
+    if (ratio > 0.3) return "ur";
+    if (ratio > 0.05) return "mixed";
+    return "en";
+  };
 
-    if (!hasAnyKey) {
+  // ===== TEXT-TO-SPEECH WITH CONVERSATION MODE CALLBACK =====
+  const speakText = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
+    if (!window.speechSynthesis) { onDone?.(); return; }
+
+    // Cancel any ongoing speech
+    window.speechSynthesis.cancel();
+
+    const cleanText = text
+      .replace(/```[\s\S]*?```/g, " code block ")
+      .replace(/`[^`]+`/g, "")
+      .replace(/\*\*[^*]+\*\*/g, (match) => match.replace(/\*\*/g, ""))
+      .replace(/\*[^*]+\*/g, (match) => match.replace(/\*/g, ""))
+      .replace(/#{1,6}\s/g, "")
+      .replace(/[#*_~\[\]()]/g, "")
+      .replace(/https?:\/\/\S+/g, "")
+      .trim();
+
+    if (!cleanText) { onDone?.(); return; }
+
+    // Split long text into chunks for better TTS
+    const chunks = cleanText.match(/.{1,200}[.!?۔]|.{1,200}/g) || [cleanText];
+    let chunkIndex = 0;
+
+    const speakChunk = () => {
+      if (chunkIndex >= chunks.length) {
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        onDone?.();
+        return;
+      }
+
+      const chunk = chunks[chunkIndex].trim();
+      if (!chunk) { chunkIndex++; speakChunk(); return; }
+
+      const utterance = new SpeechSynthesisUtterance(chunk);
+      utterance.rate = emotion === "happy" || emotion === "surprised" ? 1.05 : 0.92;
+      utterance.pitch = emotion === "happy" ? 1.15 : emotion === "serious" ? 0.85 : 1.0;
+      utterance.volume = 1.0;
+
+      const voices = window.speechSynthesis.getVoices();
+      const lang = detectLanguage(chunk);
+
+      if (lang === "ur" || lang === "mixed") {
+        const urduVoice = voices.find((v) => v.lang.startsWith("ur"));
+        if (urduVoice) {
+          utterance.voice = urduVoice;
+          utterance.lang = "ur-PK";
+        } else {
+          // Fallback: use any Arabic/Persian voice for Urdu
+          const arabicVoice = voices.find((v) => v.lang.startsWith("ar") || v.lang.startsWith("fa"));
+          if (arabicVoice) {
+            utterance.voice = arabicVoice;
+            utterance.lang = "ur-PK";
+          }
+        }
+      } else {
+        const englishVoice = voices.find((v) =>
+          v.lang.startsWith("en") && (v.name.includes("Google") || v.name.includes("Natural"))
+        ) || voices.find((v) => v.lang.startsWith("en"));
+        if (englishVoice) {
+          utterance.voice = englishVoice;
+          utterance.lang = "en-US";
+        }
+      }
+
+      utterance.onend = () => {
+        chunkIndex++;
+        speakChunk();
+      };
+
+      utterance.onerror = () => {
+        chunkIndex++;
+        speakChunk();
+      };
+
+      synthUtteranceRef.current = utterance;
+      window.speechSynthesis.speak(utterance);
+    };
+
+    setIsSpeaking(true);
+    isSpeakingRef.current = true;
+    speakChunk();
+  }, []);
+
+  // ===== START LISTENING (STT) =====
+  const startListening = useCallback((autoSend: boolean = false) => {
+    if (isRecording || isSpeakingRef.current) return;
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("Speech recognition not supported. Please use Chrome.");
+      return;
+    }
+
+    // Cancel any ongoing speech first
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+    isSpeakingRef.current = false;
+
+    const recognition = new SpeechRecognition();
+    // Support both Urdu and English
+    recognition.lang = "ur-PK";
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      setIsRecording(false);
+      setIsListening(false);
+
+      if (transcript.trim()) {
+        setInput(transcript);
+        // AUTO-SEND: In conversation mode OR when autoSend flag is true
+        if (autoSend || conversationModeRef.current) {
+          // Small delay to let state update
+          setTimeout(() => {
+            sendMessageDirect(transcript.trim());
+          }, 100);
+        }
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      console.log("Speech recognition error:", event.error);
+      setIsRecording(false);
+      setIsListening(false);
+      // In conversation mode, try listening again after a brief pause
+      if (conversationModeRef.current && event.error !== "not-allowed") {
+        setTimeout(() => {
+          if (conversationModeRef.current && !isLoadingRef.current && !isSpeakingRef.current) {
+            startListening(true);
+          }
+        }, 500);
+      }
+    };
+
+    recognition.onend = () => {
+      setIsRecording(false);
+      setIsListening(false);
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
+    setIsRecording(true);
+    setIsListening(true);
+  }, [isRecording]);
+
+  // ===== SEND MESSAGE (direct, no callback dependency issues) =====
+  const sendMessageDirect = useCallback(async (text: string) => {
+    if (!text.trim() || isLoadingRef.current) return;
+
+    const currentKeys: APIKeys = {
+      groq: apiKeys.groq || "",
+      gemini: apiKeys.gemini || "",
+      openai: apiKeys.openai || "",
+      zai: apiKeys.zai || "",
+    };
+
+    if (!Object.values(currentKeys).some((k) => k && k.trim().length > 0)) {
       setShowSettings(true);
       return;
     }
@@ -101,18 +276,23 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setIsLoading(true);
+    isLoadingRef.current = true;
     setStreamingContent("");
 
     try {
+      const currentMessages = await new Promise<JarvisMessage[]>((resolve) => {
+        setMessages((prev) => { resolve(prev); return prev; });
+      });
+
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: text.trim(),
           userId,
-          history: messages.slice(-20),
+          history: currentMessages.slice(-20),
           stream: true,
-          apiKeys,
+          apiKeys: currentKeys,
           activeProvider,
         }),
       });
@@ -153,11 +333,19 @@ export default function ChatPage() {
                 };
                 setMessages((prev) => [...prev, assistantMsg]);
                 setStreamingContent("");
-                speakText(fullContent, emotion);
+                // Speak the response
+                speakText(fullContent, emotion, () => {
+                  // AFTER SPEAKING: In conversation mode, auto-listen again
+                  if (conversationModeRef.current) {
+                    setTimeout(() => {
+                      if (conversationModeRef.current && !isSpeakingRef.current) {
+                        startListening(true);
+                      }
+                    }, 300);
+                  }
+                });
               }
-            } catch {
-              // Skip malformed data
-            }
+            } catch { /* skip */ }
           }
         }
       }
@@ -170,68 +358,58 @@ export default function ChatPage() {
         timestamp: Date.now(),
       };
       setMessages((prev) => [...prev, errorMsg]);
+
+      // In conversation mode, try listening again after error
+      if (conversationModeRef.current) {
+        setTimeout(() => {
+          if (conversationModeRef.current) startListening(true);
+        }, 1000);
+      }
     } finally {
       setIsLoading(false);
+      isLoadingRef.current = false;
     }
-  }, [isLoading, messages, userId, apiKeys, activeProvider, hasAnyKey]);
+  }, [userId, apiKeys, activeProvider, speakText, startListening]);
 
-  // TTS
-  const speakText = (text: string, emotion: EmotionType) => {
-    if (!window.speechSynthesis) return;
-    const cleanText = text
-      .replace(/\*\*[^*]+\*\*/g, "")
-      .replace(/```[\s\S]*?```/g, " code block ")
-      .replace(/`[^`]+`/g, "")
-      .replace(/[#*_~]/g, "")
-      .replace(/\[.*?\]/g, "")
-      .trim();
-    if (!cleanText) return;
+  // ===== SEND MESSAGE (from input field) =====
+  const sendMessage = useCallback(async (text: string) => {
+    sendMessageDirect(text);
+  }, [sendMessageDirect]);
 
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-    utterance.rate = emotion === "happy" || emotion === "surprised" ? 1.1 : 0.95;
-    utterance.pitch = emotion === "happy" ? 1.2 : emotion === "serious" ? 0.9 : 1.0;
+  // ===== TOGGLE CONVERSATION MODE =====
+  const toggleConversationMode = useCallback(() => {
+    const newMode = !conversationMode;
+    setConversationMode(newMode);
+    conversationModeRef.current = newMode;
 
-    const voices = window.speechSynthesis.getVoices();
-    const urduVoice = voices.find((v) => v.lang.startsWith("ur"));
-    const englishVoice = voices.find((v) => v.lang.startsWith("en") && v.name.includes("Google"));
-    const urduChars = cleanText.match(/[\u0600-\u06FF]/g);
-    if (urduChars && urduChars.length > cleanText.length * 0.3 && urduVoice) {
-      utterance.voice = urduVoice;
-      utterance.lang = "ur-PK";
-    } else if (englishVoice) {
-      utterance.voice = englishVoice;
-      utterance.lang = "en-US";
+    if (newMode) {
+      // Start conversation mode - begin listening
+      setTimeout(() => {
+        startListening(true);
+      }, 200);
+    } else {
+      // Stop conversation mode - stop listening and speaking
+      recognitionRef.current?.stop();
+      window.speechSynthesis.cancel();
+      setIsRecording(false);
+      setIsListening(false);
+      setIsSpeaking(false);
+      isSpeakingRef.current = false;
     }
-    window.speechSynthesis.speak(utterance);
-  };
+  }, [conversationMode, startListening]);
 
-  // STT
+  // ===== TOGGLE RECORDING (manual mode) =====
   const toggleRecording = useCallback(() => {
+    if (conversationMode) return; // In conversation mode, use the mode button instead
+
     if (isRecording) {
       recognitionRef.current?.stop();
       setIsRecording(false);
-      return;
+      setIsListening(false);
+    } else {
+      startListening(false); // Manual mode - don't auto-send
     }
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert("Speech recognition not supported. Please use Chrome.");
-      return;
-    }
-    const recognition = new SpeechRecognition();
-    recognition.lang = "ur-PK";
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      setInput(transcript);
-      setIsRecording(false);
-    };
-    recognition.onerror = () => setIsRecording(false);
-    recognition.onend = () => setIsRecording(false);
-    recognitionRef.current = recognition;
-    recognition.start();
-    setIsRecording(true);
-  }, [isRecording]);
+  }, [isRecording, conversationMode, startListening]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -239,6 +417,14 @@ export default function ChatPage() {
       sendMessage(input);
     }
   };
+
+  // ===== Auto-send when input changes from voice (manual mode) =====
+  useEffect(() => {
+    if (!conversationMode && input && isRecording === false) {
+      // Voice input was just set - don't auto-send in manual mode
+      // User can press Enter or click Send
+    }
+  }, [input, conversationMode, isRecording]);
 
   const quickActions = [
     { icon: "🔍", text: "Search the web", prompt: "Search for latest tech news" },
@@ -276,19 +462,54 @@ export default function ChatPage() {
                 connectionStatus === "nokey" ? "status-offline" : "status-offline"
               }`}></span>
               <span style={{ color: "var(--text-secondary)" }}>
-                {connectionStatus === "online" ? `Online • ${providerLabels[activeProvider]}` :
-                 connectionStatus === "nokey" ? "⚠️ Add API Key" : "Offline"} • {emotionEmojis[currentEmotion]} {currentEmotion}
+                {connectionStatus === "online" ? `${providerLabels[activeProvider]}` :
+                 connectionStatus === "nokey" ? "⚠️ Add API Key" : "Offline"}
+                {" • "}{emotionEmojis[currentEmotion]} {currentEmotion}
+                {conversationMode && " • 🎙️ Conversation Mode"}
               </span>
             </div>
           </div>
         </div>
         <div style={{ display: "flex", gap: "8px" }}>
+          <button
+            className={`btn-icon ${conversationMode ? "btn-conversation-active" : "btn-conversation"}`}
+            onClick={toggleConversationMode}
+            title={conversationMode ? "Conversation Mode ON - Click to stop" : "Start Conversation Mode (like ChatGPT voice)"}
+            disabled={!hasAnyKey}
+          >
+            {conversationMode ? "🎙️" : "🎧"}
+          </button>
           <button className="btn-icon" style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
-            onClick={() => window.speechSynthesis.cancel()} title="Stop speaking">🔇</button>
+            onClick={() => { window.speechSynthesis.cancel(); setIsSpeaking(false); isSpeakingRef.current = false; }}
+            title="Stop speaking">🔇</button>
           <button className="btn-icon" style={{ background: "var(--bg-tertiary)", color: "var(--text-secondary)" }}
             onClick={() => setShowSettings(true)} title="Settings">⚙️</button>
         </div>
       </header>
+
+      {/* Conversation Mode Banner */}
+      {conversationMode && (
+        <div style={{
+          padding: "10px 16px", background: "linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(59, 130, 246, 0.15))",
+          borderBottom: "1px solid rgba(16, 185, 129, 0.3)", display: "flex",
+          alignItems: "center", justifyContent: "center", gap: "10px",
+        }}>
+          <div className={`voice-pulse ${isSpeaking ? "speaking" : isListening ? "listening" : "waiting"}`}>
+            <div className="voice-pulse-ring"></div>
+            <div className="voice-pulse-dot">
+              {isSpeaking ? "🔊" : isListening ? "🎤" : "⏳"}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: "13px", color: "#10b981" }}>
+              {isSpeaking ? "JARVIS bol raha hai..." : isListening ? "Sun raha hoon... boliye!" : "Conversation Mode"}
+            </div>
+            <div style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+              {isSpeaking ? "Jawab suniye, phir aapki baari" : isListening ? "ابھی بولیں، میں سن رہا ہوں" : "Boliye, sunega aur jawab dega"}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Messages */}
       <div className="chat-messages">
@@ -315,6 +536,21 @@ export default function ChatPage() {
                   color: "white", border: "none", borderRadius: "8px",
                   cursor: "pointer", fontWeight: 600,
                 }}>⚙️ Settings کھولیں</button>
+              </div>
+            )}
+            {hasAnyKey && (
+              <div style={{
+                marginTop: "20px", padding: "16px 24px",
+                background: "rgba(16, 185, 129, 0.1)", border: "1px solid rgba(16, 185, 129, 0.3)",
+                borderRadius: "12px", color: "#10b981", textAlign: "center",
+              }}>
+                <p style={{ fontWeight: 600, marginBottom: "8px" }}>🎙️ Conversation Mode</p>
+                <p style={{ fontSize: "14px", opacity: 0.9 }}>
+                  ہیڈر میں 🎧 بٹن دبائیں — بولیں، JARVIS سنیگا، جواب دے گا، پھر سنیگا!
+                </p>
+                <p style={{ fontSize: "12px", opacity: 0.7, marginTop: "6px" }}>
+                  Like ChatGPT voice conversation — hands-free baat-cheet
+                </p>
               </div>
             )}
             <div className="quick-actions">
@@ -364,8 +600,12 @@ export default function ChatPage() {
       {/* Input */}
       <div className="chat-input-area">
         <div className="chat-input-wrapper">
-          <button className={`btn-icon btn-voice ${isRecording ? "recording" : ""}`}
-            onClick={toggleRecording} title={isRecording ? "Stop recording" : "Start voice input"}>
+          <button
+            className={`btn-icon btn-voice ${isRecording ? "recording" : ""} ${conversationMode ? "btn-voice-disabled" : ""}`}
+            onClick={toggleRecording}
+            title={conversationMode ? "Conversation Mode mein hai - 🎧 use karo" : isRecording ? "Stop recording" : "Start voice input (auto-sends)"}
+            disabled={conversationMode}
+          >
             {isRecording ? "⏹️" : "🎤"}
           </button>
           <textarea ref={inputRef} className="chat-input" value={input}
@@ -376,7 +616,10 @@ export default function ChatPage() {
             disabled={!input.trim() || isLoading || !hasAnyKey} title="Send message">➤</button>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px", fontSize: "11px", color: "var(--text-secondary)" }}>
-          <span>{hasAnyKey ? `${providerLabels[activeProvider]} • Browser Voice` : "⚠️ No API Key"}</span>
+          <span>
+            {hasAnyKey ? `${providerLabels[activeProvider]}` : "⚠️ No API Key"}
+            {conversationMode ? " • 🎙️ Conversation ON" : " • 🎧 Click for voice chat"}
+          </span>
           <span>Enter to send • Shift+Enter new line</span>
         </div>
       </div>
@@ -430,7 +673,6 @@ function SettingsPanel({
           کم از کم ایک API Key ڈالیں تاکہ JARVIS چل سکے۔ Keys آپ کے browser میں محفوظ رہیں گی۔
         </p>
 
-        {/* Active Provider Selection */}
         <label style={{ fontWeight: 600, marginBottom: "8px" }}>🎯 Active Provider</label>
         <select
           value={localProvider}
@@ -446,7 +688,6 @@ function SettingsPanel({
           ))}
         </select>
 
-        {/* API Key Inputs */}
         {providers.map((provider) => (
           <div key={provider.id} style={{
             marginBottom: "16px", padding: "14px",
@@ -477,7 +718,6 @@ function SettingsPanel({
           </div>
         ))}
 
-        {/* Save/Cancel */}
         <div style={{ display: "flex", gap: "10px", marginTop: "20px" }}>
           <button onClick={handleSave} style={{
             flex: 1, padding: "10px",
