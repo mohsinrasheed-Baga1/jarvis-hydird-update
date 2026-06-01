@@ -311,6 +311,83 @@ export default function ChatPage() {
     speakChunk();
   }, [speakUrduFallback]);
 
+  // ===== SERVER-SIDE URDU TTS (No CORS issues!) =====
+  const speakUrduServer = useCallback(async (text: string, emotion: EmotionType, onDone?: () => void) => {
+    setIsSpeaking(true);
+    isSpeakingRef.current = true;
+    speakQueueRef.current = true;
+
+    try {
+      const chunks = splitUrduChunks(text);
+      let chunkIndex = 0;
+
+      const playChunk = async () => {
+        if (!speakQueueRef.current || chunkIndex >= chunks.length) {
+          setIsSpeaking(false);
+          isSpeakingRef.current = false;
+          speakQueueRef.current = false;
+          onDone?.();
+          return;
+        }
+
+        const chunk = chunks[chunkIndex].trim();
+        if (!chunk) { chunkIndex++; await playChunk(); return; }
+
+        try {
+          // Call OUR server-side TTS endpoint (no CORS!)
+          const res = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: chunk.substring(0, 200), lang: "ur" }),
+          });
+
+          if (res.ok) {
+            const contentType = res.headers.get("content-type") || "";
+            if (contentType.includes("audio") || contentType.includes("mpeg")) {
+              const blob = await res.blob();
+              const url = URL.createObjectURL(blob);
+              const audio = new Audio(url);
+              currentAudioRef.current = audio;
+
+              audio.onended = () => {
+                currentAudioRef.current = null;
+                URL.revokeObjectURL(url);
+                chunkIndex++;
+                playChunk();
+              };
+
+              audio.onerror = () => {
+                currentAudioRef.current = null;
+                URL.revokeObjectURL(url);
+                chunkIndex++;
+                playChunk();
+              };
+
+              await audio.play();
+              return;
+            }
+          }
+          // Server TTS failed for this chunk, skip to next
+          console.warn("[JARVIS] Server TTS chunk failed, skipping");
+          chunkIndex++;
+          await playChunk();
+        } catch (err) {
+          console.warn("[JARVIS] Server TTS error:", err);
+          // Fall back to browser TTS
+          speakUrduCloud(text, emotion, onDone);
+        }
+      };
+
+      await playChunk();
+    } catch {
+      setIsSpeaking(false);
+      isSpeakingRef.current = false;
+      speakQueueRef.current = false;
+      // Fall back to browser Urdu TTS
+      speakUrduCloud(text, emotion, onDone);
+    }
+  }, [speakUrduCloud]);
+
   // ===== TTS — Urdu/English Smart =====
   const speakText = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
     cancelAllSpeech();
@@ -327,7 +404,8 @@ export default function ChatPage() {
     if (!cleanText) { onDone?.(); return; }
     const lang = detectLanguage(cleanText);
     if (lang === "ur" || lang === "mixed") {
-      speakUrduCloud(cleanText, emotion, onDone);
+      // PRIMARY: Server-side TTS (no CORS issues!)
+      speakUrduServer(cleanText, emotion, onDone);
     } else {
       const voices = window.speechSynthesis.getVoices();
       const selectedVoice = voices.find(v =>
@@ -340,7 +418,7 @@ export default function ChatPage() {
         voices.find(v => v.lang.startsWith("en")) || null;
       speakWithBrowser(cleanText, "en", emotion, selectedVoice, onDone);
     }
-  }, [cancelAllSpeech, speakUrduCloud]);
+  }, [cancelAllSpeech, speakUrduServer]);
 
   // ===== STT — Start Listening =====
   const startListening = useCallback((autoSend: boolean = false) => {
