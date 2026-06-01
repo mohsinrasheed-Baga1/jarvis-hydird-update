@@ -335,10 +335,17 @@ export default function ChatPage() {
 
         try {
           // Call OUR server-side TTS endpoint (no CORS!)
+          // Pass ElevenLabs key if available for natural voice
+          const elevenlabsKey = localStorage.getItem("jarvis_elevenlabs_key") || "";
           const res = await fetch("/api/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: chunk.substring(0, 200), lang: "ur" }),
+            body: JSON.stringify({
+              text: chunk.substring(0, 200),
+              lang: "ur",
+              emotion: emotion,
+              elevenlabsKey: elevenlabsKey || undefined,
+            }),
           });
 
           if (res.ok) {
@@ -892,6 +899,10 @@ function SettingsPanel({
 }) {
   const [localKeys, setLocalKeys] = useState<APIKeys>({ ...apiKeys });
   const [localProvider, setLocalProvider] = useState<LLMProvider>(activeProvider);
+  const [elevenlabsKey, setElevenlabsKey] = useState(() => {
+    if (typeof window === "undefined") return "";
+    return localStorage.getItem("jarvis_elevenlabs_key") || "";
+  });
 
   const providers: Array<{ id: LLMProvider; name: string; keyPlaceholder: string; getKeyUrl: string; free: boolean }> = [
     { id: "groq", name: "Groq (Llama 3.3 70B)", keyPlaceholder: "gsk_...", getKeyUrl: "https://console.groq.com", free: true },
@@ -899,6 +910,13 @@ function SettingsPanel({
     { id: "openai", name: "OpenAI (GPT-4o Mini)", keyPlaceholder: "sk-...", getKeyUrl: "https://platform.openai.com/api-keys", free: false },
     { id: "zai", name: "ZAI (GLM-4 Flash)", keyPlaceholder: "your-zai-api-key", getKeyUrl: "https://open.bigmodel.cn", free: true },
   ];
+
+  const handleSave = () => {
+    onSaveKeys(localKeys);
+    onSaveProvider(localProvider);
+    localStorage.setItem("jarvis_elevenlabs_key", elevenlabsKey);
+    onClose();
+  };
 
   return (
     <div className="settings-overlay" onClick={onClose}>
@@ -944,8 +962,29 @@ function SettingsPanel({
           </div>
         ))}
 
+        {/* ===== VOICE / TTS Section ===== */}
+        <div style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color)" }}>
+          <h3 style={{ fontSize: "15px", fontWeight: 600, marginBottom: "12px" }}>🎙️ Natural Voice (TTS)</h3>
+          <p style={{ color: "var(--text-muted)", fontSize: "12px", marginBottom: "16px" }}>
+            ElevenLabs key ڈالیں تو بالکل نیچرل انسانی آواز آئے گی۔ بغیر key کے Google TTS استعمال ہوگا۔
+          </p>
+          <div className="provider-card" style={{ borderColor: elevenlabsKey ? "rgba(34,197,94,0.3)" : undefined }}>
+            <div className="provider-header">
+              <span className="provider-name">🆓 ElevenLabs (Natural Voice)</span>
+              {elevenlabsKey && <span className="provider-saved">✅</span>}
+            </div>
+            <input type="password" className="provider-input"
+              value={elevenlabsKey}
+              onChange={(e) => setElevenlabsKey(e.target.value)}
+              placeholder="xi_... (free tier available)" />
+            <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer" className="provider-link">
+              Free API Key لیں →
+            </a>
+          </div>
+        </div>
+
         <div className="settings-actions">
-          <button className="btn-save" onClick={() => { onSaveKeys(localKeys); onSaveProvider(localProvider); onClose(); }}>
+          <button className="btn-save" onClick={handleSave}>
             💾 Save & Close
           </button>
           <button className="btn-cancel" onClick={onClose}>Cancel</button>
