@@ -124,12 +124,12 @@ export class LLMRouter {
 - "product_hunter": Product research, trending products, SEO, market analysis
 - "code": Code writing, debugging, execution, review
 - "upload": Upload to platforms (Redbubble, Amazon, Etsy)
-- "freelance": Freelancing tasks — proposals, job analysis, cover letters, negotiation, pricing, job search strategy
-- "whatsapp": WhatsApp communication — drafting messages, auto-replies, follow-ups, chat strategy
+- "freelance": Freelancing tasks — hunting jobs, proposals, job analysis, cover letters, negotiation, pricing, applying, portfolio pitch, full pipeline
+- "whatsapp": WhatsApp communication — client chat, drafting messages, auto-replies, follow-ups, chat strategy
 - "task_manager": Complex autonomous tasks that need planning and multi-step execution, daily plans
 
 URDU KEYWORDS MAPPING:
-- پروپوزل،رکاوٹ،فری لانس،جاب،نوکری،کلائنٹ،بجٹ → freelance
+- پروپوزل،فری لانس،جاب،نوکری،کلائنٹ،بجٹ،جوبس ڈھونڈو،اپلائی → freelance
 - واٹس ایپ،میسج،چیٹ،پیغام،ریپلائی → whatsapp
 - پلان،حکمت عملی،روزانہ،ٹاسک مینیجر → task_manager
 
@@ -140,15 +140,21 @@ requiresLocal is true for: windows, file (download/write), upload agents
 requiresLocal is false for: general, browser (search), product_hunter, code (write only), freelance, whatsapp, task_manager
 
 ACTION MAPPING for freelance:
+- "hunt_jobs": Search for jobs on platforms (DEFAULT for job search requests)
+- "apply_to_job": Apply to a specific job with proposal + portfolio
+- "full_pipeline": Complete pipeline — hunt, apply, negotiate, report
 - "generate_proposal": Writing a proposal for a job
 - "analyze_job": Analyzing a job posting
 - "cover_letter": Writing a cover letter
 - "negotiate": Negotiation help
 - "pricing_strategy": Pricing advice
-- "job_search_strategy": How to find jobs
+- "job_search_strategy": How to find jobs strategically
 - "client_response": Reply to client message
+- "portfolio_pitch": Present portfolio to a client
+- "match_skills": Match skills to job
 
 ACTION MAPPING for whatsapp:
+- "client_chat": Chat with client as Rayan Sir (DEFAULT for client conversations)
 - "draft_message": Compose a new message
 - "auto_reply": Auto-reply to incoming message
 - "professional_reply": Professional response

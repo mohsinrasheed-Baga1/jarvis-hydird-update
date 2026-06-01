@@ -683,14 +683,16 @@ export default function ChatPage() {
 
   const quickActions = [
     { icon: "🎙️", text: "Voice Chat", prompt: "", isConvMode: true },
-    { icon: "📝", text: "Generate Proposal", prompt: "Generate a winning freelance proposal for me" },
-    { icon: "💬", text: "WhatsApp Reply", prompt: "Help me draft a professional WhatsApp reply" },
-    { icon: "🔍", text: "Analyze a Job", prompt: "Analyze this job posting and give me a strategy" },
+    { icon: "🎯", text: "Hunt Jobs", prompt: "Mujhe jobs dhundho — web development, frontend, React, Next.js ke liye sab main platforms pe jobs talaash karo" },
+    { icon: "🚀", text: "Full Pipeline", prompt: "Poora freelancing pipeline chalao — jobs dhundho, apply karo, negotiate karo, best strategy banao" },
+    { icon: "💬", text: "Client Chat", prompt: "Client se WhatsApp pe baat karni hai — help me chat naturally as Rayan Sir" },
+    { icon: "📝", text: "Write Proposal", prompt: "Winning proposal likho — job description de raha hoon" },
+    { icon: "🎨", text: "Portfolio Pitch", prompt: "Portfolio pitch banao jo client ko impress kare" },
   ];
 
   const emotionEmojis: Record<EmotionType, string> = {
     happy: "😊", encouraging: "💪", serious: "⚡",
-    sympathetic: "💙", surprised: "😲", normal: "🤖",
+    sympathetic: "💙", surprised: "😲", normal: "🙂",
   };
 
   const providerLabels: Record<LLMProvider, string> = {
@@ -702,7 +704,7 @@ export default function ChatPage() {
       {/* Header */}
       <header className="chat-header">
         <div className="header-brand">
-          <div className="brand-icon">🤖</div>
+          <div className="brand-icon">🧠</div>
           <div>
             <div className="brand-title">JARVIS</div>
             <div className="brand-status">
@@ -733,10 +735,10 @@ export default function ChatPage() {
           </div>
           <div>
             <div className="conv-info-title">
-              {isSpeaking ? "JARVIS bol raha hai..." : isListening ? "Sun raha hoon... boliye!" : "🎙️ Voice Chat ON"}
+              {isSpeaking ? "جاروس بول رہا ہے..." : isListening ? "سن رہا ہوں... بولیے!" : "🎙️ وائس چیٹ آن"}
             </div>
             <div className="conv-info-sub">
-              {isSpeaking ? "Jawab suniye, phir aapki baari" : isListening ? "Ab boliye — auto-send" : "Boliye, sunega aur jawab dega"}
+              {isSpeaking ? "جواب سنیے، پھر آپ کی باری" : isListening ? "اب بولیے — آٹو سینڈ" : "بولیے، سنے گا اور انسان کی طرح جواب دے گا"}
             </div>
           </div>
         </div>
@@ -757,10 +759,10 @@ export default function ChatPage() {
       <div className="chat-messages">
         {messages.length === 0 && !streamingContent ? (
           <div className="welcome-screen">
-            <div className="welcome-logo">🤖</div>
+            <div className="welcome-logo">🧠</div>
             <h1 className="welcome-title">JARVIS</h1>
             <p className="welcome-subtitle">
-              آپ کا ذاتی AI اسسٹنٹ — بولیں، سنیں، فری لانسنگ، واٹس ایپ، کام کریں
+              ریان سر کا ذاتی ساتھی — جobs تلاش، کلائنٹس سے بات، فری لانسنگ سب کچھ!
             </p>
 
             {!hasAnyKey ? (
@@ -773,9 +775,9 @@ export default function ChatPage() {
               </div>
             ) : (
               <div className="welcome-alert welcome-alert-success">
-                <p style={{ fontWeight: 600 }}>🎙️ Voice Chat Available</p>
+                <p style={{ fontWeight: 600 }}>🎙️ نیچرل وائس چیٹ تیار ہے!</p>
                 <p style={{ fontSize: "13px", opacity: 0.85 }}>
-                  نیچے 🎧 dabao — boliye, JARVIS sunega, jawab dega, phir sunega!
+                  نیچے 🎧 دباؤ — بولو، جاروس سنے گا، انسان کی طرح جواب دے گا!
                 </p>
               </div>
             )}
@@ -881,7 +883,7 @@ export default function ChatPage() {
           <span>
             {hasAnyKey ? providerLabels[activeProvider] : "⚠️ No Key"}
             {conversationMode ? " · 🎙️ Voice Chat ON" : " · 🎧 = voice chat"}
-            {" · 📝 Freelance · 💬 WhatsApp"}
+            {" · 🎯 Hunt Jobs · 💬 Client Chat"}
           </span>
           <span>Enter to send</span>
         </div>

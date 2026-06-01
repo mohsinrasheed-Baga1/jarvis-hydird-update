@@ -22,9 +22,9 @@ async function tryElevenLabs(
 ): Promise<Response | null> {
   if (!apiKey) return null;
 
-  // ElevenLabs voice IDs for natural voices
-  const urduVoiceId = "onwK4e9ZLuTAKqWW03F9"; // Female multilingual
-  const englishVoiceId = "21m00Tcm4TlvDq8ikWAM"; // Rachel - natural female
+  // ElevenLabs voice IDs — most natural multilingual voices
+  const urduVoiceId = "onwK4e9ZLuTAKqWW03F9"; // Female multilingual — warm and natural
+  const englishVoiceId = "EXAVITQu4vr4xnSDxMaL"; // Bella — most natural female voice
 
   const voiceId = lang === "ur" ? urduVoiceId : englishVoiceId;
 
@@ -58,6 +58,8 @@ async function tryElevenLabs(
             style: settings.style,
             use_speaker_boost: true,
           },
+          // Add prosody for more natural speech
+          output_format: "mp3_44100_128",
         }),
       }
     );
@@ -91,17 +93,20 @@ async function tryOpenAITTS(
 ): Promise<Response | null> {
   if (!apiKey) return null;
 
-  // OpenAI TTS voices - alloy is great for multilingual
+  // OpenAI TTS voices — MOST NATURAL voices for human-like speech
+  // Nova = friendly, warm, natural female voice (best for casual)
+  // Shimmer = soft, gentle, caring voice (best for Urdu/sympathetic)
   const voiceMap: Record<string, string> = {
-    happy: "nova",       // Upbeat, friendly
-    serious: "onyx",     // Deep, authoritative
-    sympathetic: "shimmer", // Warm, gentle
-    surprised: "fable",  // Expressive
+    happy: "nova",       // Upbeat, friendly, natural
+    serious: "nova",     // Still nova — sounds more human than onyx
+    sympathetic: "shimmer", // Warm, gentle, caring
+    surprised: "nova",   // Expressive, natural
     encouraging: "nova",  // Friendly, uplifting
-    normal: "alloy",     // Neutral, clear
+    normal: "nova",      // Nova is the most natural-sounding voice
   };
 
-  const voice = lang === "ur" ? "alloy" : (voiceMap[emotion] || "alloy");
+  // For Urdu, shimmer is warmer and more natural; for English, use emotion-based
+  const voice = lang === "ur" ? "shimmer" : (voiceMap[emotion] || "nova");
 
   try {
     const response = await fetch("https://api.openai.com/v1/audio/speech", {
@@ -114,7 +119,8 @@ async function tryOpenAITTS(
         model: "tts-1-hd",
         input: text.substring(0, 4096),
         voice: voice,
-        speed: emotion === "happy" || emotion === "surprised" ? 1.1 : emotion === "serious" ? 0.9 : 1.0,
+        // Natural speed — slightly varied for emotion, but close to human
+        speed: emotion === "happy" || emotion === "surprised" ? 1.05 : emotion === "serious" ? 0.95 : 1.0,
       }),
     });
 
