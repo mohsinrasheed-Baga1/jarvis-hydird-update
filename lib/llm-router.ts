@@ -71,7 +71,7 @@ export class LLMRouter {
     }
 
     // Try fallback providers
-    const allProviders: LLMProvider[] = ["groq", "gemini", "openai", "zai"];
+    const allProviders: LLMProvider[] = ["groq", "gemini", "openai", "zai", "xai", "anthropic"];
     const fallbacks = allProviders.filter(
       (p) => p !== provider && this._hasKey(p as LLMProvider)
     );
@@ -118,7 +118,7 @@ export class LLMRouter {
       console.error(`[LLM Router] ${provider} stream failed:`, primaryError);
 
       // Fallback to non-streaming with another provider
-      const allProviders: LLMProvider[] = ["groq", "gemini", "openai", "zai"];
+      const allProviders: LLMProvider[] = ["groq", "gemini", "openai", "zai", "xai", "anthropic"];
       const fallbacks = allProviders.filter(
         (p) => p !== provider && this._hasKey(p as LLMProvider)
       );
@@ -247,6 +247,10 @@ ACTION MAPPING for whatsapp:
         return this._chatOpenAI(messages, config);
       case "zai":
         return this._chatZAI(messages, config);
+      case "xai":
+        return this._chatXAI(messages, config);
+      case "anthropic":
+        return this._chatAnthropic(messages, config);
       default:
         throw new Error(`Unknown provider: ${provider}`);
     }
@@ -524,11 +528,73 @@ ACTION MAPPING for whatsapp:
     return data.choices[0]?.message?.content || "";
   }
 
+  // ============== XAI ==============
+
+  private async _chatXAI(
+    messages: Array<{ role: string; content: string }>,
+    config: LLMConfig
+  ): Promise<string> {
+    const apiKey = this.apiKeys.xai || process.env.XAI_API_KEY;
+    if (!apiKey) throw new Error("xAI API key not provided");
+
+    const models = PROVIDER_MODELS.xai;
+    const response = await fetch("https://api.x.ai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: config.model || models.primary,
+        messages: messages.map((m) => ({ role: m.role, content: m.content })),
+        temperature: config.temperature,
+        max_tokens: config.maxTokens,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`xAI API error: ${err}`);
+    }
+    const data = await response.json();
+    return data.choices[0]?.message?.content || "";
+  }
+
+  // ============== ANTHROPIC ==============
+
+  private async _chatAnthropic(
+    messages: Array<{ role: string; content: string }>,
+    config: LLMConfig
+  ): Promise<string> {
+    const apiKey = this.apiKeys.anthropic || process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error("Anthropic API key not provided");
+
+    const models = PROVIDER_MODELS.anthropic;
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: config.model || models.primary,
+        max_tokens: config.maxTokens,
+        system: messages.find(m => m.role === "system")?.content || "You are a helpful assistant.",
+        messages: messages.filter(m => m.role !== "system").map((m) => ({ role: m.role, content: m.content })),
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Anthropic API error: ${err}`);
+    }
+    const data = await response.json();
+    return data.content?.[0]?.text || "";
+  }
+
   // ============== HELPERS ==============
 
   private _selectProvider(): LLMProvider {
     // Pick the first available provider with an API key
-    const order: LLMProvider[] = ["groq", "gemini", "openai", "zai"];
+    const order: LLMProvider[] = ["groq", "gemini", "openai", "zai", "xai", "anthropic"];
     for (const p of order) {
       if (this._hasKey(p)) return p;
     }
@@ -545,13 +611,17 @@ ACTION MAPPING for whatsapp:
         return !!(this.apiKeys.openai || process.env.OPENAI_API_KEY);
       case "zai":
         return !!(this.apiKeys.zai || process.env.ZAI_API_KEY);
+      case "xai":
+        return !!(this.apiKeys.xai || process.env.XAI_API_KEY);
+      case "anthropic":
+        return !!(this.apiKeys.anthropic || process.env.ANTHROPIC_API_KEY);
       default:
         return false;
     }
   }
 
   getAvailableProviders(): LLMProvider[] {
-    return (["groq", "gemini", "openai", "zai"] as LLMProvider[]).filter((p) =>
+    return (["groq", "gemini", "openai", "zai", "xai", "anthropic"] as LLMProvider[]).filter((p) =>
       this._hasKey(p)
     );
   }

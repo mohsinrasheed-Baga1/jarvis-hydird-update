@@ -91,13 +91,15 @@ export interface UserPreferences {
 
 // ============== LLM PROVIDERS ==============
 
-export type LLMProvider = "groq" | "gemini" | "openai" | "zai";
+export type LLMProvider = "groq" | "gemini" | "openai" | "zai" | "xai" | "anthropic";
 
 export interface APIKeys {
   groq?: string;      // gsk_...
   gemini?: string;    // AIza...
   openai?: string;    // sk-...
   zai?: string;       // custom
+  xai?: string;       // xai-...
+  anthropic?: string; // sk-ant-...
 }
 
 export interface LLMConfig {
@@ -139,6 +141,18 @@ export const PROVIDER_MODELS: Record<LLMProvider, { primary: string; fallback: s
     label: "ZAI (GLM-4 Flash)",
     placeholder: "your-zai-api-key",
   },
+  xai: {
+    primary: "grok-2",
+    fallback: "grok-2-mini",
+    label: "xAI / Grok",
+    placeholder: "xai-...",
+  },
+  anthropic: {
+    primary: "claude-3-5-sonnet-20241022",
+    fallback: "claude-3-haiku-20240307",
+    label: "Anthropic / Claude",
+    placeholder: "sk-ant-...",
+  },
 };
 
 export const EMOTION_KEYWORDS: Record<EmotionType, string[]> = {
@@ -149,3 +163,47 @@ export const EMOTION_KEYWORDS: Record<EmotionType, string[]> = {
   surprised: ["ارے", "واہ", "حیرت", "wow", "really", "unexpected", "واقعی"],
   normal: [],
 };
+
+// ============== NEW TYPES ==============
+
+export type ResearchCategory = "earning" | "self-improvement" | "technical" | "general";
+export type ResearchSource = "ChatGPT" | "xAI" | "Claude" | "Grok" | "Self" | "Gemini";
+
+export interface ResearchEntry {
+  id: string;
+  title: string;
+  content: string;
+  source: ResearchSource;
+  date: number;
+  category: ResearchCategory;
+}
+
+export interface UpdateStatus {
+  hasUpdate: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  downloadUrl: string;
+  releaseNotes: string;
+  lastChecked: number;
+  status: "up-to-date" | "update-available" | "downloading" | "error";
+}
+
+export interface RecordingConfig {
+  speed: "slow" | "normal" | "fast";
+  lang: "ur" | "en";
+}
+
+export interface RecordingSpeedPreset {
+  label: string;
+  labelUr: string;
+  rate: number;
+  pitch: number;
+}
+
+export const RECORDING_SPEEDS: Record<string, RecordingSpeedPreset> = {
+  slow: { label: "Slow", labelUr: "آہستہ", rate: 0.65, pitch: 0.9 },
+  normal: { label: "Normal", labelUr: "نارمل", rate: 0.88, pitch: 1.0 },
+  fast: { label: "Fast", labelUr: "تیز", rate: 1.3, pitch: 1.05 },
+};
+
+export type SidebarSection = "dashboard" | "chat" | "recording" | "settings" | "research";
