@@ -1,0 +1,11 @@
+$ next dev
+▲ Next.js 16.2.6 (Turbopack)
+- Local:         http://localhost:3000
+- Network:       http://21.0.14.50:3000
+- Environments: .env
+✓ Ready in 381ms
+- Experiments (use with caution):
+  · serverActions
+
+ GET /api/health 200 in 523ms (next.js: 502ms, application-code: 21ms)
+ GET / 200 in 3.0s (next.js: 2.8s, application-code: 193ms)

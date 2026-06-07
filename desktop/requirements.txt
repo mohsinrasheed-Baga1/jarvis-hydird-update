@@ -1,0 +1,42 @@
+# JARVIS Hybrid - Desktop Dependencies
+# Install: pip install -r requirements.txt
+# For minimal setup (no voice): pip install -r requirements-minimal.txt
+
+# Core
+requests>=2.31.0
+websocket-client>=1.6.0
+
+# System Control
+pyautogui>=0.9.54
+psutil>=5.9.0
+pyperclip>=1.8.2
+pynput>=1.7.6
+
+# Web Scraping (for Job Search)
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Image/OCR (for WhatsApp reading - optional)
+pytesseract>=0.3.10
+Pillow>=10.0.0
+
+# GUI (optional)
+customtkinter>=5.2.0
+
+# Browser Automation (optional)
+playwright>=1.40.0
+
+# Voice (optional - may fail on Windows, use --no-voice if issues)
+# These packages can fail to install on Windows. If they do, use --no-voice flag
+piper-tts>=1.2.0; sys_platform != 'win32'
+kokoro-onnx>=0.1.0; sys_platform != 'win32'
+faster-whisper>=1.0.0; sys_platform != 'win32'
+sounddevice>=0.4.6; sys_platform != 'win32'
+numpy>=1.24.0
+
+# Windows-specific
+pywin32>=306; sys_platform == 'win32'
+pycaw>=20230407; sys_platform == 'win32'
+screen_brightness_control>=0.23.0; sys_platform == 'win32'
+win10toast>=0.9; sys_platform == 'win32'
+

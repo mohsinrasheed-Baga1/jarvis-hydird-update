@@ -1,0 +1,128 @@
+{
+  "name": "jarvis-hybrid",
+  "version": "2.0.0",
+  "description": "JARVIS Hybrid - AI Desktop Assistant with Voice & Automation",
+  "main": "electron/main.js",
+  "private": true,
+  "author": "Ryan",
+  "license": "MIT",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:react\" \"npm run dev:electron\"",
+    "dev:react": "vite",
+    "dev:electron": "wait-on http://localhost:5173 && electron .",
+    "build": "vite build && electron-builder",
+    "build:win": "vite build && electron-builder --win --x64",
+    "build:win-portable": "vite build && electron-builder --win portable --x64",
+    "build:win-publish": "vite build && electron-builder --win --x64 --publish always",
+    "build:all": "npm run build:win",
+    "preview": "vite preview",
+    "postinstall": "electron-builder install-app-deps",
+    "clean": "rimraf dist release",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^9.0.0",
+    "react-router-dom": "^6.20.0",
+    "zustand": "^4.4.0",
+    "electron-updater": "^6.3.9",
+    "electron-log": "^5.2.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.1.2",
+    "electron": "^34.2.0",
+    "electron-builder": "^25.1.8",
+    "postcss": "^8.5.1",
+    "rimraf": "^6.0.1",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.0",
+    "vite": "^6.1.0",
+    "wait-on": "^8.0.3"
+  },
+  "build": {
+    "appId": "com.jarvis.hybrid",
+    "productName": "JARVIS Hybrid",
+    "copyright": "Copyright © 2026 JARVIS Hybrid",
+    "directories": {
+      "output": "release",
+      "buildResources": "assets"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../desktop",
+        "to": "desktop",
+        "filter": ["**/*", "!**/node_modules/**", "!**/__pycache__/**", "!**/*.pyc"]
+      },
+      {
+        "from": "../.venv",
+        "to": ".venv",
+        "filter": ["**/*"],
+        "optional": true
+      },
+      {
+        "from": "assets",
+        "to": "assets"
+      }
+    ],
+    "win": {
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "JARVIS-Hybrid-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/icon.png",
+      "uninstallerIcon": "assets/icon.png",
+      "installerHeaderIcon": "assets/icon.png",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "JARVIS Hybrid",
+      "perMachine": false,
+      "allowElevation": true,
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "installerLanguages": ["en_US", "ur_PK"],
+      "language": "1033",
+      "include": "build/installer.nsh"
+    },
+    "portable": {
+      "artifactName": "JARVIS-Hybrid-Portable-${version}.exe"
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "target": ["AppImage", "deb"]
+    },
+    "mac": {
+      "icon": "assets/icon.png",
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.productivity"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "mohsinrasheed-Baga1",
+      "repo": "JARVIS-HYBRID",
+      "releaseType": "release"
+    }
+  }
+}
