@@ -1,6 +1,6 @@
 {
   "name": "jarvis-hybrid",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "JARVIS Hybrid - AI Desktop Assistant with Voice & Automation",
   "main": "electron/main.js",
   "private": true,
@@ -121,7 +121,7 @@
     "publish": {
       "provider": "github",
       "owner": "mohsinrasheed-Baga1",
-      "repo": "JARVIS-HYBRID",
+      "repo": "jarvis-hydird-update",
       "releaseType": "release"
     }
   }

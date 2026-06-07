@@ -22,7 +22,7 @@ const navItems: NavItem[] = [
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>('chat');
-  const [version, setVersion] = useState('2.0.0');
+  const [version, setVersion] = useState('2.1.0');
   const [backend, setBackend] = useState<BackendState>({ connected: false, label: 'Checking' });
 
   useEffect(() => {

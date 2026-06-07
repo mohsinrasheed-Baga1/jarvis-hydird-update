@@ -38,7 +38,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     if (queryOrUrl && queryOrUrl.startsWith('http')) return ipcRenderer.invoke('desktop-action', { type: 'play-youtube', url: queryOrUrl });
     return ipcRenderer.invoke('desktop-action', { type: 'play-youtube', query: queryOrUrl });
   },
-  playAudio: (url) => ipcRenderer.invoke('desktop-action', { type: 'play-audio', url }),
+  playAudio: (urlOrQuery) => ipcRenderer.invoke('desktop-action', { type: 'play-audio', url: urlOrQuery, query: urlOrQuery }),
+  openWhatsApp: (phone, message) => ipcRenderer.invoke('desktop-action', { type: 'open-whatsapp', phone, message }),
   systemCommand: (cmd) => ipcRenderer.invoke('desktop-action', { type: 'system-command', command: cmd }),
   volumeUp: () => ipcRenderer.invoke('desktop-action', { type: 'volume-up' }),
   volumeDown: () => ipcRenderer.invoke('desktop-action', { type: 'volume-down' }),

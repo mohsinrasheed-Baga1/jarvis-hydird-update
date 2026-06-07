@@ -7,7 +7,7 @@ const { exec, spawn } = require('child_process');
 const CLOUD_APP_URL = 'http://127.0.0.1:3000';
 const VITE_DEV_URL = 'http://127.0.0.1:5173';
 const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
 const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
 const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
@@ -91,6 +91,30 @@ async function executeDesktopAction(action = {}) {
   if (type === 'open-app' || type === 'open_app') {
     exec(process.platform === 'win32' ? `start "" "${normalizeAppName(action.app || action.name)}"` : `open -a "${action.app || action.name}"`);
     return { success: true, message: `Opened ${action.app || action.name}` };
+  }
+  if (type === 'play-audio' || type === 'play_audio') {
+    // Open audio URL in default browser/player
+    const audioUrl = action.url || '';
+    if (audioUrl) {
+      await shell.openExternal(audioUrl);
+      return { success: true, message: 'Audio opened' };
+    }
+    // If no URL but has query, search on YouTube
+    if (action.query) {
+      const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(action.query);
+      await shell.openExternal(url);
+      return { success: true, message: 'Audio search opened on YouTube' };
+    }
+    return { success: false, message: 'No audio URL or query provided' };
+  }
+  if (type === 'open-whatsapp' || type === 'whatsapp') {
+    const phone = action.phone || action.number || '';
+    const message = action.message || action.text || '';
+    const url = phone
+      ? `https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}${message ? '&text=' + encodeURIComponent(message) : ''}`
+      : 'https://web.whatsapp.com';
+    await shell.openExternal(url);
+    return { success: true, message: phone ? 'WhatsApp chat opened' : 'WhatsApp Web opened' };
   }
   if (type === 'volume-up' || type === 'volume_up') {
     if (process.platform === 'win32') return { ...(await sendVolumeKey(175, action.steps || 5)), message: 'Volume increased' };

@@ -40,8 +40,13 @@ export default function VoicePage() {
   };
 
   const startListening = async () => {
+    // In Electron, webkitSpeechRecognition doesn't work.
+    // Always use MediaRecorder + cloud Whisper for reliable voice input.
+    const isElectron = !!(window as any).electronAPI;
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SpeechRecognition) {
+
+    if (!isElectron && SpeechRecognition) {
+      // Browser mode: use native SpeechRecognition API
       const recognition = new SpeechRecognition();
       recognition.lang = language === 'en' ? 'en-US' : 'ur-PK';
       recognition.interimResults = true;
@@ -60,6 +65,7 @@ export default function VoicePage() {
       return;
     }
 
+    // Electron or fallback: use MediaRecorder + cloud Whisper API
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
@@ -71,7 +77,7 @@ export default function VoicePage() {
       recorder.onstop = transcribeFallback;
       recorder.start();
       setTranscript('');
-      setStatus('Recording...');
+      setStatus(isElectron ? 'Recording... (Cloud Whisper)' : 'Recording...');
       setIsListening(true);
       setTimeout(() => {
         if (recorderRef.current?.state === 'recording') recorderRef.current.stop();

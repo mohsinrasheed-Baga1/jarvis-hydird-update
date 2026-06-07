@@ -140,6 +140,44 @@ export default function ChatPage({ backend }: ChatPageProps) {
     }
   };
 
+  // Parse [ACTION:json] blocks from AI response text
+  const parseActionFromResponse = (text: string): { cleanText: string; actions: Record<string, unknown>[] } => {
+    const actions: Record<string, unknown>[] = [];
+    const actionRegex = /\[ACTION:(\{[^}]+\})\]/g;
+    let match;
+    let cleanText = text;
+
+    while ((match = actionRegex.exec(text)) !== null) {
+      try {
+        const actionJson = JSON.parse(match[1]);
+        actions.push(actionJson);
+      } catch {
+        // Skip malformed action blocks
+      }
+    }
+
+    // Remove action blocks from display text
+    cleanText = text.replace(actionRegex, '').trim();
+
+    return { cleanText, actions };
+  };
+
+  // Execute parsed actions via Electron IPC
+  const executeParsedActions = async (actions: Record<string, unknown>[]): Promise<boolean> => {
+    let allSuccess = true;
+    for (const action of actions) {
+      try {
+        const electronResult = await (window as any).electronAPI?.desktopAction?.(action);
+        if (!electronResult?.success) {
+          allSuccess = false;
+        }
+      } catch {
+        allSuccess = false;
+      }
+    }
+    return allSuccess;
+  };
+
   const detectLocalAutomation = (raw: string): LocalAutomationCommand | null => {
     const text = raw.toLowerCase().trim();
     const normalized = text.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ');
@@ -148,62 +186,121 @@ export default function ChatPage({ backend }: ChatPageProps) {
       return {
         localAction: { type: 'windows', action: 'volume_up', params: { steps: 5 } },
         desktopAction: { type: 'volume-up', steps: 5 },
-        confirmation: 'Done, volume increased',
+        confirmation: 'ہو گیا! والیوم بڑھا دیا 🔊',
       };
     }
     if (/(volume|awaz|awaaz|آواز|والیوم).*(down|decrease|کم|نیچے)|^(volume down|decrease volume)$/i.test(normalized)) {
       return {
         localAction: { type: 'windows', action: 'volume_down', params: { steps: 5 } },
         desktopAction: { type: 'volume-down', steps: 5 },
-        confirmation: 'Done, volume decreased',
+        confirmation: 'ہو گیا! والیوم کم کر دیا 🔉',
       };
     }
     if (/\b(mute|unmute)\b|میوٹ/i.test(normalized)) {
       return {
         localAction: { type: 'windows', action: 'mute_toggle', params: {} },
         desktopAction: { type: 'mute-toggle' },
-        confirmation: normalized.includes('unmute') ? 'Done, audio unmuted' : 'Done, audio muted',
+        confirmation: normalized.includes('unmute') ? 'ہو گیا! آواز آن کر دی 🔊' : 'ہو گیا! میوٹ کر دیا 🔇',
       };
     }
     if (/(take|capture).*(screenshot)|سکرین شاٹ|screenshot/i.test(normalized)) {
       return {
         localAction: { type: 'windows', action: 'screenshot', params: {} },
         desktopAction: { type: 'screenshot' },
-        confirmation: 'Done, screenshot created',
+        confirmation: 'ہو گیا! سکرین شاٹ لی 📸',
       };
     }
 
-    const appMatch = normalized.match(/\bopen\s+(notepad|chrome|calculator|calc|paint|cmd|powershell)\b/);
+    // YouTube with search query — most common automation request
+    // Matches: "یوٹیوب پر تلاوت لگاؤ", "YouTube pe tilawat", "یوٹیوب پر نعت", "یوٹیوب پر گانا"
+    const ytSearchMatch = normalized.match(/یوٹیوب\s*پر\s*(.+?)(?:\s*لگاؤ|\s*چلاؤ|\s*لگا|\s*چلا|\s*play|\s*چلائیں|\s*لگائیں|$)/)
+      || normalized.match(/youtube\s*(?:pe|par|on)\s*(.+?)(?:\s*play|\s*open|\s*search|$)/i)
+      || normalized.match(/(?:play|چلاؤ|لگاؤ)\s*(.+?)\s*(?:یوٹیوب|youtube)/i);
+    if (ytSearchMatch) {
+      const query = (ytSearchMatch[1] || '').trim();
+      return {
+        localAction: { type: 'search', action: 'youtube', params: { query } },
+        desktopAction: { type: 'open-youtube', query },
+        confirmation: query ? `یوٹیوب پر "${query}" لگا رہا ہوں! 🎬` : 'یوٹیوب کھول رہا ہوں! 🎬',
+      };
+    }
+
+    // Just open YouTube without search
+    if (/\bopen\s+youtube\b|یوٹیوب.*(کھول|open)/i.test(normalized)) {
+      return {
+        localAction: { type: 'search', action: 'youtube', params: { query: '' } },
+        desktopAction: { type: 'open-youtube', query: '' },
+        confirmation: 'یوٹیوب کھول رہا ہوں! 🎬',
+      };
+    }
+
+    // Audio/Music/Islamic content — redirect to YouTube search
+    if (/اذان\s*لگاؤ|adan|azan|اذان/i.test(normalized)) {
+      return {
+        localAction: { type: 'search', action: 'youtube', params: { query: 'adan azan call to prayer' } },
+        desktopAction: { type: 'open-youtube', query: 'adan azan call to prayer' },
+        confirmation: 'اذان لگا رہا ہوں! 🕌',
+      };
+    }
+    if (/تلاوت|tilawat|قرآن\s*چلاؤ|quran\s*play/i.test(normalized)) {
+      return {
+        localAction: { type: 'search', action: 'youtube', params: { query: 'quran tilawat' } },
+        desktopAction: { type: 'open-youtube', query: 'quran tilawat' },
+        confirmation: 'تلاوت چلا رہا ہوں! 📖',
+      };
+    }
+    if (/نعت|naat|نعت\s*لگاؤ/i.test(normalized)) {
+      return {
+        localAction: { type: 'search', action: 'youtube', params: { query: 'naat sharif' } },
+        desktopAction: { type: 'open-youtube', query: 'naat sharif' },
+        confirmation: 'نعت لگا رہا ہوں! 🌹',
+      };
+    }
+    if (/گانا|song|music|موسیقی/i.test(normalized) && /چلاؤ|لگاؤ|play|بجاؤ/i.test(normalized)) {
+      return {
+        localAction: { type: 'search', action: 'youtube', params: { query: 'songs music' } },
+        desktopAction: { type: 'open-youtube', query: 'songs music' },
+        confirmation: 'گانا چلا رہا ہوں! 🎵',
+      };
+    }
+
+    const appMatch = normalized.match(/\bopen\s+(notepad|chrome|calculator|calc|paint|cmd|powershell)\b/)
+      || normalized.match(/(notepad|chrome|calculator|calc|paint|cmd|powershell)\s*(کھولو|کھول|chalao|open|chalao)/i);
     if (appMatch) {
       const app = appMatch[1] === 'calc' ? 'calculator' : appMatch[1];
       const label = app === 'chrome' ? 'Chrome' : app.charAt(0).toUpperCase() + app.slice(1);
       return {
         localAction: { type: 'windows', action: 'open_app', params: { name: app } },
         desktopAction: { type: 'open-app', app },
-        confirmation: `Done, ${label} opened`,
+        confirmation: `ہو گیا! ${label} کھل گیا ✅`,
       };
     }
-    if (/\bopen\s+youtube\b|یوٹیوب.*(کھول|open)/i.test(normalized)) {
+
+    // Open any URL
+    const urlMatch = normalized.match(/(https?:\/\/[^\s]+)/i);
+    if (urlMatch) {
       return {
-        localAction: { type: 'search', action: 'youtube', params: { query: '' } },
-        desktopAction: { type: 'open-youtube', query: '' },
-        confirmation: 'Done, YouTube opened',
+        localAction: { type: 'browser', action: 'open_url', params: { url: urlMatch[1] } },
+        desktopAction: { type: 'open-url', url: urlMatch[1] },
+        confirmation: 'ویب سائٹ کھول رہا ہوں! 🌐',
       };
     }
-    const googleMatch = normalized.match(/\bsearch\s+google(?:\s+for)?\s*(.*)$/) || normalized.match(/\bgoogle\s+search\s*(.*)$/);
+
+    const googleMatch = normalized.match(/\bsearch\s+google(?:\s+for)?\s*(.*)$/) || normalized.match(/\bgoogle\s+search\s*(.*)$/)
+      || normalized.match(/گوگل\s*(?:پر\s*)?search|گوگل\s*(?:سے\s*)?ڈھونڈو/i);
     if (googleMatch) {
       const query = (googleMatch[1] || '').trim();
       return {
         localAction: { type: 'search', action: query ? 'google' : 'open_url', params: query ? { query } : { url: 'https://www.google.com' } },
         desktopAction: query ? { type: 'search-google', query } : { type: 'open-url', url: 'https://www.google.com' },
-        confirmation: query ? 'Done, Google search opened' : 'Done, Google opened',
+        confirmation: query ? `گوگل پر "${query}" سرچ کر رہا ہوں! 🔍` : 'گوگل کھول رہا ہوں! 🔍',
       };
     }
     if (/\bopen\s+google\b|گوگل.*(کھول|open)/i.test(normalized)) {
       return {
         localAction: { type: 'browser', action: 'open_url', params: { url: 'https://www.google.com' } },
         desktopAction: { type: 'open-url', url: 'https://www.google.com' },
-        confirmation: 'Done, Google opened',
+        confirmation: 'گوگل کھول رہا ہوں! 🔍',
       };
     }
     return null;
@@ -286,13 +383,39 @@ export default function ChatPage({ backend }: ChatPageProps) {
           });
 
       if (response.requiresLocalAction && response.localAction) {
-        await apiClient.queueLocalAction(storageService.getAppState().userId, response.localAction).catch(() => undefined);
+        // Execute local action directly via Electron IPC (most reliable)
+        try {
+          const electronResult = await (window as any).electronAPI?.desktopAction?.(response.localAction);
+          if (electronResult?.success) {
+            // Action executed successfully, modify message to confirm
+            response.message = response.message || 'Action executed!';
+          }
+        } catch {
+          // Fallback: queue via API
+          await apiClient.queueLocalAction(storageService.getAppState().userId, response.localAction).catch(() => undefined);
+        }
+      }
+
+      // Parse [ACTION:json] blocks from AI response and execute them
+      let displayMessage = response.message || 'No response returned.';
+      const { cleanText, actions } = parseActionFromResponse(displayMessage);
+      if (actions.length > 0) {
+        displayMessage = cleanText;
+        // Execute all parsed actions via Electron IPC
+        setAutomationStatus('Executing action...');
+        try {
+          await executeParsedActions(actions);
+          setAutomationStatus('Action completed ✅');
+        } catch {
+          setAutomationStatus('Action failed');
+        }
+        window.setTimeout(() => setAutomationStatus(automationConnected ? 'Automation Connected' : 'Automation Offline'), 3000);
       }
 
       const assistantMessage: StoredChatMessage = {
         id: `assistant_${Date.now()}`,
         role: 'assistant',
-        content: response.message || 'No response returned.',
+        content: displayMessage,
         emotion: response.emotion,
         timestamp: Date.now(),
       };

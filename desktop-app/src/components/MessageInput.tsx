@@ -396,30 +396,15 @@ export default function MessageInput({
       return;
     }
 
+    // In Electron, webkitSpeechRecognition doesn't work.
+    // Skip electronAPI.listenOnce (requires Windows System.Speech which may not be installed)
+    // and go straight to MediaRecorder + cloud Whisper which is reliable.
+    const isElectron = !!(window as any).electronAPI;
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      const nativeListen = (window as any).electronAPI?.listenOnce;
-      if (nativeListen) {
-        try {
-          setIsListening(true);
-          setMicState('listening');
-          setVoiceStatus('Listening...');
-          const prefs = storageService.getPreferences();
-          const result = await nativeListen(prefs.language === 'en' ? 'en-US' : 'ur-PK');
-          setMicState('processing');
-          if (result?.success && result.text) {
-            setInput(result.text);
-            inputRef.current = result.text;
-            resizeTextarea();
-            setVoiceStatus('Voice captured');
-            setMicState('ready');
-            scheduleVoiceSend(result.text);
-            return;
-          }
-        } catch {
-          setIsListening(false);
-        }
-      }
+
+    if (isElectron || !SpeechRecognition) {
+      // In Electron: use MediaRecorder to capture audio, then send to cloud Whisper API
+      // This is the most reliable path for Electron desktop app
       await startRecordedFallback(true);
       return;
     }

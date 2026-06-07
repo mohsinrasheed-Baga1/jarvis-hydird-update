@@ -159,7 +159,7 @@ export class LLMRouter {
         role: "system",
         content: `You are a task classifier for JARVIS AI assistant. Classify the user's message into one of these agents:
 - "general": General conversation, questions, greetings
-- "windows": OS control (open apps, screenshots, system info, brightness, volume)
+- "windows": OS control (open apps, screenshots, system info, brightness, volume, LOCK system)
 - "browser": Web search, scraping, browsing, form filling
 - "file": File operations (read, write, convert, download, organize)
 - "product_hunter": Product research, trending products, SEO, market analysis
@@ -169,10 +169,22 @@ export class LLMRouter {
 - "whatsapp": WhatsApp communication — client chat, drafting messages, auto-replies, follow-ups, chat strategy
 - "task_manager": Complex autonomous tasks that need planning and multi-step execution, daily plans
 
+IMPORTANT DESKTOP ACTION MAPPING:
+The following requests MUST be classified as "windows" agent because they are local desktop actions:
+- "یوٹیوب کھولو" / "open youtube" / "یوٹیوب پر تلاوت لگاؤ" / "YouTube pe tilawat" → windows (with action: "open_youtube")
+- "اذان لگاؤ" / "play azan" / "نعت لگاؤ" / "play naat" → windows (with action: "play_audio")
+- "گانا چلاؤ" / "play song" / "تلاوت" / "tilawat" → windows (with action: "play_audio")
+- "chrome kholo" / "notepad open" / "open calculator" → windows (with action: "open_app")
+- "والیوم اپ" / "volume up" / "والیوم ڈاؤن" / "volume down" → windows (with action: "volume_control")
+- "میوٹ" / "mute" / "lock karo" / "سکرین شاٹ" / "screenshot" → windows
+- ANY request to open a URL, website, or app → windows
+- ANY request to control system (volume, lock, screenshot) → windows
+
 URDU KEYWORDS MAPPING:
 - پروپوزل،فری لانس،جاب،نوکری،کلائنٹ،بجٹ،جوبس ڈھونڈو،اپلائی → freelance
 - واٹس ایپ،میسج،چیٹ،پیغام،ریپلائی → whatsapp
 - پلان،حکمت عملی،روزانہ،ٹاسک مینیجر → task_manager
+- کھولو،چلاؤ،لگاؤ،والیوم،سکرین شاٹ،لاک → windows
 
 Respond ONLY with valid JSON:
 {"agent": "agent_name", "action": "brief_action", "params": {}, "requiresLocal": true/false, "confidence": 0.0-1.0}
@@ -201,7 +213,16 @@ ACTION MAPPING for whatsapp:
 - "professional_reply": Professional response
 - "friendly_reply": Casual response
 - "negotiate_chat": Negotiate via chat
-- "follow_up": Follow-up message`,
+- "follow_up": Follow-up message
+
+ACTION MAPPING for windows:
+- "open_youtube": Open YouTube or search on YouTube
+- "open_app": Open a desktop application
+- "open_url": Open a URL in browser
+- "volume_control": Change system volume
+- "screenshot": Take a screenshot
+- "lock_system": Lock the computer
+- "play_audio": Play audio/music/Islamic content`,
       },
       {
         role: "user",
