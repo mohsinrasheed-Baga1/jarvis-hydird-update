@@ -384,6 +384,7 @@ export default function ChatPage({ backend }: ChatPageProps) {
     setIsLoading(true);
 
     try {
+      // ─── Step 1: Check for local automation commands ───
       const automation = !file ? detectLocalAutomation(messageText) : null;
       if (automation) {
         await executeAutomation(automation);
@@ -401,6 +402,59 @@ export default function ChatPage({ backend }: ChatPageProps) {
 
       const userId = storageService.getAppState().userId;
       const apiKeys = storageService.getApiKeys();
+      const electronAPI = (window as any).electronAPI;
+      const isElectron = !!electronAPI?.chatCompletion;
+
+      // ─── Step 2: Try IPC-based chat first (works without backend!) ───
+      if (isElectron && !file) {
+        try {
+          // Build conversation history from current messages
+          const chatHistory = messages
+            .filter(m => m.id !== 'welcome')
+            .slice(-10)
+            .map(m => ({ role: m.role, content: m.content }));
+
+          const ipcResult = await electronAPI.chatCompletion(
+            messageText,
+            chatHistory,
+            selectedModel,
+            apiKeys,
+          );
+
+          if (ipcResult.success && ipcResult.message) {
+            // Parse [ACTION:json] blocks and execute them
+            let displayMessage = ipcResult.message;
+            const { cleanText, actions } = parseActionFromResponse(displayMessage);
+            if (actions.length > 0) {
+              displayMessage = cleanText;
+              setAutomationStatus('Executing action...');
+              try {
+                await executeParsedActions(actions);
+                setAutomationStatus('Action completed ✅');
+              } catch {
+                setAutomationStatus('Action failed');
+              }
+              window.setTimeout(() => setAutomationStatus(automationConnected ? 'Automation Connected' : 'Automation Offline'), 3000);
+            }
+
+            const assistantMessage: StoredChatMessage = {
+              id: `assistant_${Date.now()}`,
+              role: 'assistant',
+              content: displayMessage,
+              emotion: ipcResult.emotion,
+              timestamp: Date.now(),
+            };
+            setMessages(prev => [...prev, assistantMessage]);
+            speakAssistantResponse(assistantMessage.content, ipcResult.emotion);
+            return;
+          }
+          // IPC chat failed - fall through to backend API
+        } catch (ipcErr) {
+          console.warn('IPC chat failed, trying backend:', ipcErr);
+        }
+      }
+
+      // ─── Step 3: Fall back to backend API chat ───
       const response = file
         ? await apiClient.uploadFile(
             userId,
@@ -495,9 +549,9 @@ export default function ChatPage({ backend }: ChatPageProps) {
 
       {!backend?.connected && (
         <div className="mx-auto mt-4 max-w-5xl w-full px-6">
-          <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-            <div className="font-medium">Local backend is not ready.</div>
-            <div className="mt-1 text-amber-100/80">{backend?.error || backend?.label || 'Waiting for /api/health on port 3000.'}</div>
+          <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-sm text-blue-200">
+            <div className="font-medium">Backend offline — using direct API mode</div>
+            <div className="mt-1 text-blue-100/80">Chat, voice, and automation still work via direct API calls. File analysis needs the backend.</div>
           </div>
         </div>
       )}
@@ -516,7 +570,7 @@ export default function ChatPage({ backend }: ChatPageProps) {
         <div className="max-w-5xl mx-auto px-6 py-5">
           <MessageInput
             onSendMessage={handleSendMessage}
-            isLoading={isLoading || !backend?.connected}
+            isLoading={isLoading}
             voiceRepliesEnabled={voiceRepliesEnabled}
             onVoiceRepliesChange={changeVoiceReplies}
             speechStatus={speechStatus}

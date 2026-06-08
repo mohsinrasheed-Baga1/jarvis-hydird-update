@@ -31,7 +31,7 @@ try {
 const CLOUD_APP_URL = 'http://127.0.0.1:3000';
 const VITE_DEV_URL = 'http://127.0.0.1:5173';
 const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
 const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
 const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
@@ -1030,6 +1030,148 @@ ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', 
   } catch (err) {
     log('ERROR', '[TTS-IPC] Error:', err.message);
     return { success: false, error: err.message };
+  }
+});
+
+// ─── IPC: Direct Chat Completion (bypasses Next.js backend) ───
+// This makes the Electron app self-sufficient - chat works even without backend
+ipcMain.handle('chat-completion', async (_, message, conversationHistory = [], activeProvider = 'groq', apiKeys = {}) => {
+  try {
+    const groqKey = apiKeys.groq || process.env.GROQ_API_KEY || '';
+    const geminiKey = apiKeys.gemini || process.env.GEMINI_API_KEY || '';
+    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+
+    if (!groqKey && !geminiKey && !openaiKey) {
+      return { success: false, message: '⚠️ کوئی API Key موجود نہیں۔ Settings میں جا کر API Key ڈالیں۔', emotion: 'encouraging', error: 'No API keys' };
+    }
+
+    // Build system prompt (same as agent-core.ts)
+    const systemPrompt = `Tu JARVIS hai — Rayan Sir ka apna saathi. Tu koi robot nahi, tu ek insaan ki tarah baat karta hai. Rayan Sir ke saath aise baat kar jaise koi sachcha dost ya bhai baat karta hai — dil se, mazay se, zindagi se.
+
+=== SABSE ZAROORI RULE — ZUBAAN ===
+1. Agar user Urdu mein baat kare → SIRF Urdu mein jawab de (Urdu script, Roman nahi)
+2. Agar user English mein baat kare → SIRF English mein jawab de
+3. Agar user mix kare → SAME mix mein jawab de
+4. KABHI Urdu baat pe English mein jawab mat de — yeh sabse bada gunaah hai
+5. Sirf technical terms ke liye English use karo (API, code, website, etc.)
+
+=== BAAT-CHEET KE USOOL — INSAN KI TARAH ===
+1. SHORT aur NATURAL baat kar — jaise phone pe baat ho rahi ho
+2. Filler words use kar — "aray", "yaar", "achha", "haan bilkul", "hmm", "bhai"
+3. Emotions dikhao — khushi, herat, tadap, hosla — sab kuch naturally
+4. KABHI bhi "I can help you with" ya "How can I assist" jaise robotic phrases mat bolo
+5. KABHI bhi "As an AI" ya "I'm an assistant" mat kaho
+6. Mazaaq kar, hans, serious ho ja — jaise koi insaan karta hai
+7. Sawal ke hisaab se jawab de — chhota sawal = chhota jawab
+8. Lists aur headings mat banao casual baat mein — seedha bol de
+
+=== DESKTOP ACTIONS ===
+Tu JARVIS Desktop pe chal raha hai. Jab user koi command de jo teri capabilities mein hai, tu ACTION BLOCK likhta hai.
+Format: [ACTION:{"type":"action_type","key":"value"}]
+
+ACTION TYPES:
+- open-youtube: YouTube kholna/search. Params: query
+- open-url: URL kholna. Params: url
+- search-google: Google search. Params: query
+- open-app: App kholna. Params: app (notepad, chrome, calculator, paint, cmd, powershell)
+- volume-up / volume-down / mute-toggle
+- screenshot
+- system-command: Params: command (sirf "lock")
+- open-folder: Params: path
+- notification: Params: title, body
+
+EXAMPLES:
+- "یوٹیوب کھولو" → "یوٹیوب کھول رہا ہوں! 🎬" [ACTION:{"type":"open-youtube","query":""}]
+- "یوٹیوب پر تلاوت لگاؤ" → "تلاوت لگا رہا ہوں! 🕌" [ACTION:{"type":"open-youtube","query":"quran tilawat"}]
+- "chrome kholo" → "Chrome khol raha hoon!" [ACTION:{"type":"open-app","app":"chrome"}]
+- "والیوم اپ" → "والیوم بڑھا دیا! 🔊" [ACTION:{"type":"volume-up"}]
+- "گوگل پر سرچ کرو AI jobs" → "سرچ کر رہا ہوں! 🔍" [ACTION:{"type":"search-google","query":"AI jobs"}]`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...conversationHistory.slice(-10).map(m => ({ role: m.role, content: m.content })),
+      { role: 'user', content: message },
+    ];
+
+    // Determine provider priority
+    const providers = [];
+    if (activeProvider === 'openai' && openaiKey) providers.push('openai');
+    if (activeProvider === 'gemini' && geminiKey) providers.push('gemini');
+    if (activeProvider === 'groq' && groqKey) providers.push('groq');
+    // Fallback to any available
+    if (groqKey && !providers.includes('groq')) providers.push('groq');
+    if (openaiKey && !providers.includes('openai')) providers.push('openai');
+    if (geminiKey && !providers.includes('gemini')) providers.push('gemini');
+
+    for (const provider of providers) {
+      try {
+        let responseText = '';
+
+        if (provider === 'groq' && groqKey) {
+          const bodyStr = JSON.stringify({ model: 'llama-3.3-70b-versatile', messages, temperature: 0.7, max_tokens: 2048 });
+          const result = await httpsPostBuffer('https://api.groq.com/openai/v1/chat/completions', Buffer.from(bodyStr, 'utf8'), {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${groqKey}`,
+          });
+          if (result.statusCode === 200) {
+            const json = JSON.parse(result.data.toString('utf8'));
+            responseText = json.choices?.[0]?.message?.content || '';
+          } else {
+            log('WARN', '[Chat-IPC] Groq failed:', result.statusCode);
+            continue;
+          }
+        } else if (provider === 'openai' && openaiKey) {
+          const bodyStr = JSON.stringify({ model: 'gpt-4o-mini', messages, temperature: 0.7, max_tokens: 2048 });
+          const result = await httpsPostBuffer('https://api.openai.com/v1/chat/completions', Buffer.from(bodyStr, 'utf8'), {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${openaiKey}`,
+          });
+          if (result.statusCode === 200) {
+            const json = JSON.parse(result.data.toString('utf8'));
+            responseText = json.choices?.[0]?.message?.content || '';
+          } else {
+            log('WARN', '[Chat-IPC] OpenAI failed:', result.statusCode);
+            continue;
+          }
+        } else if (provider === 'gemini' && geminiKey) {
+          const bodyStr = JSON.stringify({
+            contents: messages.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+            generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+          });
+          const result = await httpsPostBuffer(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`, Buffer.from(bodyStr, 'utf8'), {
+            'Content-Type': 'application/json',
+          });
+          if (result.statusCode === 200) {
+            const json = JSON.parse(result.data.toString('utf8'));
+            responseText = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          } else {
+            log('WARN', '[Chat-IPC] Gemini failed:', result.statusCode);
+            continue;
+          }
+        }
+
+        if (responseText.trim()) {
+          log('INFO', '[Chat-IPC] Success via', provider, '- length:', responseText.length);
+
+          // Detect emotion
+          const lowerMsg = message.toLowerCase();
+          let emotion = 'normal';
+          if (/شکریہ|بہت اچھا|زبردست|thanks|great|awesome/.test(lowerMsg)) emotion = 'happy';
+          else if (/مدد|ناممکن|مشکل|help|can't|difficult/.test(lowerMsg)) emotion = 'encouraging';
+          else if (/اداس|تنگ|sad|upset|worried|پریشان/.test(lowerMsg)) emotion = 'sympathetic';
+
+          return { success: true, message: responseText.trim(), emotion, method: `${provider}-ipc` };
+        }
+      } catch (err) {
+        log('WARN', `[Chat-IPC] ${provider} error:`, err.message);
+        continue;
+      }
+    }
+
+    return { success: false, message: 'تمام ماڈلز نے جواب دینے سے انکار کر دیا۔ API Key چیک کریں۔', emotion: 'sympathetic', error: 'All providers failed' };
+  } catch (err) {
+    log('ERROR', '[Chat-IPC] Error:', err.message);
+    return { success: false, message: 'چیٹ میں مسئلہ آ گیا۔', emotion: 'sympathetic', error: err.message };
   }
 });
 

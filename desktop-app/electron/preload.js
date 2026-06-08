@@ -61,6 +61,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Generate TTS audio via ElevenLabs / OpenAI / Sarvam in main process
   generateTTS: (text, lang, emotion, apiKeys) => ipcRenderer.invoke('tts-generate', text, lang, emotion, apiKeys),
 
+  // Direct chat completion via Groq/Gemini/OpenAI (bypasses Next.js backend)
+  // This makes the app self-sufficient - chat works without backend running
+  chatCompletion: (message, conversationHistory, activeProvider, apiKeys) => ipcRenderer.invoke('chat-completion', message, conversationHistory, activeProvider, apiKeys),
+
   // DEPRECATED: recordAndTranscribe removed - recording must happen in renderer context
   // where navigator.mediaDevices is available. Use the renderer's MediaRecorder + transcribeAudioBase64 instead.
 
