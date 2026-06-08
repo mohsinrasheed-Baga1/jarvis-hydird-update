@@ -1,24 +1,23 @@
 ---
 Task ID: 1
 Agent: Main Agent
-Task: Fix all JARVIS-HYBRID issues and push to GitHub
+Task: Fix mic/voice input and ElevenLabs TTS in Electron desktop app
 
 Work Log:
-- Cloned repo from https://github.com/mohsinrasheed-Baga1/jarvis-hydird-update.git
-- Read all critical files: main.js, preload.js, ChatPage.tsx, MessageInput.tsx, VoicePage.tsx, agent-core.ts, llm-router.ts, package.json, apiClient.ts
-- Fixed Voice/Mic: In Electron, webkitSpeechRecognition doesn't work. Changed MessageInput.tsx and VoicePage.tsx to skip it and go directly to MediaRecorder + cloud Whisper API
-- Built Automation System: AI now outputs [ACTION:json] blocks in responses. Added parseActionFromResponse() and executeParsedActions() in ChatPage.tsx to parse and execute actions via electronAPI.desktopAction()
-- Enhanced detectLocalAutomation with Urdu patterns for tilawat, naat, azan, songs, YouTube search
-- Added play-audio and open-whatsapp action types in main.js executeDesktopAction
-- Updated AI system prompt with detailed [ACTION:json] format instructions and examples
-- Enhanced LLM classifier with desktop action mapping (YouTube, audio, apps, volume → windows agent)
-- Added mapClassificationToDesktopAction() to convert classification to Electron IPC action types
-- Fixed auto-update: Changed GitHub repo name from JARVIS-HYBRID to jarvis-hydird-update in package.json
-- Fixed git remote URL to point to correct repo
-- Updated version to 2.1.0 across all files
-- Committed and pushed all changes to GitHub
+- Cloned repo from GitHub and analyzed full codebase architecture
+- Identified root cause: preload.js `recordAndTranscribe` uses `navigator.mediaDevices.getUserMedia` in Electron's isolated preload context, which is unreliable with contextIsolation=true
+- Identified TTS issue: when IPC TTS fails, code falls back to speechSynthesis (robotic voice) instead of trying backend API properly
+- Identified update issue: Electron loads dist/ which isn't rebuilt after git pull
+
+Fixes Applied:
+1. **preload.js**: Rewrote `recordAndTranscribe` to use renderer-based MediaRecorder then IPC transcription. Kept IPC helpers (`transcribeAudioBase64`, `generateTTS`) which work reliably.
+2. **MessageInput.tsx**: Changed `toggleMic()` to always use `startRecordedFallback()` in Electron (renderer-based recording). Updated `finishRecordedInput()` to try IPC transcription first, then backend API.
+3. **ChatPage.tsx**: Improved TTS fallback chain - IPC TTS → backend API TTS → speechSynthesis. Added `tryBackendTTS()` helper.
+4. **VoicePage.tsx**: Rewrote to use renderer-based recording + IPC transcription instead of broken preload approach.
+5. **main.js**: Added `rebuildViteIfNeeded()` auto-rebuild on startup. Improved `loadWebApp()` to prefer dist/ with fallback chain.
+6. **START_JARVIS.bat**: Added better logging for Vite build process.
 
 Stage Summary:
-- 10 files changed, 297 insertions, 63 deletions
-- Successfully pushed commit 1dd3c93 to https://github.com/mohsinrasheed-Baga1/jarvis-hydird-update.git
-- Version bumped from 2.0.0 to 2.1.0
+- All 6 files committed locally but CANNOT push to GitHub without authentication token
+- User needs to either: (a) provide GitHub token, or (b) pull these changes manually
+- Key architecture fix: Recording happens in RENDERER context (reliable), transcription happens via IPC to MAIN process (reliable)
