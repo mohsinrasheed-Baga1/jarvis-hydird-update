@@ -22,10 +22,16 @@ export default function SettingsPage() {
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
   const [saved, setSaved] = useState(false);
   const [status, setStatus] = useState('');
+  const [keyStatus, setKeyStatus] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     setApiKeys(storageService.getApiKeys());
     setActiveProvider(storageService.getActiveProvider());
+    // Check which keys are available in the main process
+    const electronAPI = (window as any).electronAPI;
+    if (electronAPI?.getApiKeyStatus) {
+      electronAPI.getApiKeyStatus().then((s: Record<string, boolean>) => setKeyStatus(s)).catch(() => {});
+    }
   }, []);
 
   const updateKey = (provider: KeyId, value: string) => {
@@ -33,9 +39,16 @@ export default function SettingsPage() {
     setSaved(false);
   };
 
-  const save = () => {
+  const save = async () => {
     storageService.setApiKeys(apiKeys);
     storageService.setActiveProvider(activeProvider);
+    // Also save to .env file via IPC so main process can use them for STT/TTS
+    try {
+      const electronAPI = (window as any).electronAPI;
+      if (electronAPI?.saveApiKeys) {
+        await electronAPI.saveApiKeys(apiKeys);
+      }
+    } catch {}
     setSaved(true);
     setTimeout(() => setSaved(false), 2500);
   };
@@ -74,7 +87,12 @@ export default function SettingsPage() {
           <div className="space-y-4">
             {[...providers, ...voiceProviders].map(provider => (
               <div key={provider.id}>
-                <label className="block text-sm font-medium text-slate-300 mb-2">{provider.label} API key</label>
+                <label className="block text-sm font-medium text-slate-300 mb-2">
+                  {provider.label} API key
+                  {keyStatus[provider.id] && (
+                    <span className="ml-2 text-green-400 text-xs">(Active in system)</span>
+                  )}
+                </label>
                 <div className="flex gap-2">
                   <input
                     type={showKeys[provider.id] ? 'text' : 'password'}

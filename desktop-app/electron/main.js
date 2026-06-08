@@ -3,11 +3,35 @@ const path = require('path');
 const fs = require('fs');
 const { exec, spawn } = require('child_process');
 
+// ─── Load .env file for API keys ───
+// This allows users to set GROQ_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY etc. in a .env file
+try {
+  const envPaths = [
+    path.join(__dirname, '..', '.env'),
+    path.join(__dirname, '..', '..', '.env'),
+    path.join(process.cwd(), '.env'),
+  ];
+  for (const envPath of envPaths) {
+    if (fs.existsSync(envPath)) {
+      const envContent = fs.readFileSync(envPath, 'utf8');
+      for (const line of envContent.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const match = trimmed.match(/^([A-Z_]+)=(.*)$/);
+        if (match && !process.env[match[1]]) {
+          process.env[match[1]] = match[2].replace(/^["']|["']$/g, '');
+        }
+      }
+      break;
+    }
+  }
+} catch {}
+
 // ─── Configuration ───
 const CLOUD_APP_URL = 'http://127.0.0.1:3000';
 const VITE_DEV_URL = 'http://127.0.0.1:5173';
 const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
 const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
 const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
@@ -698,6 +722,55 @@ ipcMain.handle('get-app-version', () => APP_VERSION);
 ipcMain.handle('toggle-devtools', () => { if (mainWindow) mainWindow.webContents.toggleDevTools(); });
 ipcMain.handle('get-log-path', () => logFile);
 ipcMain.handle('is-desktop', () => true);
+
+// IPC: Save API keys to .env file so they persist across sessions and are available in main process
+ipcMain.handle('save-api-keys', async (_, keys = {}) => {
+  try {
+    const envPath = path.join(__dirname, '..', '.env');
+    const existingLines = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8').split('\n') : [];
+    const envMap = {};
+    for (const line of existingLines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const match = trimmed.match(/^([A-Z_]+)=(.*)$/);
+      if (match) envMap[match[1]] = match[2].replace(/^["']|["']$/g, '');
+    }
+    const keyMapping = {
+      groq: 'GROQ_API_KEY',
+      openai: 'OPENAI_API_KEY',
+      gemini: 'GEMINI_API_KEY',
+      elevenlabs: 'ELEVENLABS_API_KEY',
+      sarvam: 'SARVAM_API_KEY',
+    };
+    for (const [shortName, envName] of Object.entries(keyMapping)) {
+      if (keys[shortName] !== undefined) {
+        envMap[envName] = keys[shortName];
+        process.env[envName] = keys[shortName]; // Also set in current process
+      }
+    }
+    const lines = ['# JARVIS Hybrid API Keys', '# Auto-generated - do not edit manually'];
+    for (const [key, value] of Object.entries(envMap)) {
+      lines.push(`${key}=${value}`);
+    }
+    fs.writeFileSync(envPath, lines.join('\n') + '\n', 'utf8');
+    log('INFO', '[Env] API keys saved to .env file');
+    return { success: true };
+  } catch (err) {
+    log('ERROR', '[Env] Failed to save API keys:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: Get available API key status (without revealing the actual keys)
+ipcMain.handle('get-api-key-status', () => {
+  return {
+    groq: !!(process.env.GROQ_API_KEY),
+    openai: !!(process.env.OPENAI_API_KEY),
+    gemini: !!(process.env.GEMINI_API_KEY),
+    elevenlabs: !!(process.env.ELEVENLABS_API_KEY),
+    sarvam: !!(process.env.SARVAM_API_KEY),
+  };
+});
 ipcMain.handle('get-app-url', () => CLOUD_APP_URL);
 ipcMain.handle('get-platform', () => process.platform);
 ipcMain.handle('get-status', () => ({ cloudReady, pythonReady, cloudError, pythonError, backendUrl: CLOUD_APP_URL }));

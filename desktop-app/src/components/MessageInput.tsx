@@ -210,7 +210,46 @@ export default function MessageInput({
     try {
       setVoiceStatus('Transcribing...');
       const prefs = storageService.getPreferences();
-      const result = await apiClient.transcribeAudio(audio, storageService.getApiKeys(), prefs.language);
+      const apiKeys = storageService.getApiKeys();
+      const lang = prefs.language === 'en' ? 'en' : 'ur';
+      const electronAPI = (window as any).electronAPI;
+
+      // In Electron: Use IPC-based transcription (bypasses need for backend server)
+      // This calls the main process which directly hits Groq/OpenAI Whisper APIs
+      if (electronAPI?.transcribeAudioBase64) {
+        try {
+          const reader = new FileReader();
+          const base64Result = await new Promise<string>((resolve, reject) => {
+            reader.onload = () => {
+              const base64 = (reader.result as string).split(',')[1];
+              resolve(base64);
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(audio);
+          });
+
+          const result = await electronAPI.transcribeAudioBase64(base64Result, lang, apiKeys);
+          if (result.success && result.text) {
+            setInput(result.text);
+            inputRef.current = result.text;
+            resizeTextarea();
+            setVoiceStatus('Voice captured');
+            setMicState('ready');
+            if (manualListeningRef.current && !selectedFileRef.current) scheduleVoiceSend(result.text);
+            window.setTimeout(() => setVoiceStatus(''), 2500);
+            return;
+          }
+          // IPC transcription failed, show error
+          showVoiceStatus(result.error || 'Voice recognition failed. Check Groq/OpenAI API key in Settings.');
+          return;
+        } catch (ipcErr) {
+          console.warn('IPC transcription failed, trying backend:', ipcErr);
+          // Fall through to backend API
+        }
+      }
+
+      // Fallback: Use backend API transcription (requires Next.js backend running)
+      const result = await apiClient.transcribeAudio(audio, apiKeys, prefs.language);
       if (result.text) {
         setInput(result.text);
         inputRef.current = result.text;
@@ -223,7 +262,7 @@ export default function MessageInput({
         showVoiceStatus('No speech recognized');
       }
     } catch {
-      showVoiceStatus('Voice transcription needs a Groq or OpenAI key');
+      showVoiceStatus('Voice transcription needs a Groq or OpenAI key in Settings');
     }
   };
 
@@ -398,48 +437,20 @@ export default function MessageInput({
 
     const electronAPI = (window as any).electronAPI;
     const isElectron = !!electronAPI;
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-    // In Electron: Use IPC-based recording + transcription (most reliable)
-    if (isElectron && electronAPI.recordAndTranscribe) {
-      setIsListening(true);
-      setMicState('listening');
-      setVoiceStatus('Recording... Speak now');
-
-      try {
-        const prefs = storageService.getPreferences();
-        const apiKeys = storageService.getApiKeys();
-        const lang = prefs.language === 'en' ? 'en' : 'ur';
-        const result = await electronAPI.recordAndTranscribe(lang, apiKeys);
-
-        if (result.success && result.text) {
-          setInput(result.text);
-          inputRef.current = result.text;
-          resizeTextarea();
-          setVoiceStatus('Voice captured: ' + result.text.substring(0, 30));
-          setMicState('ready');
-          // Auto-send the transcribed text
-          if (result.text.trim() && !selectedFileRef.current) {
-            handleSend(result.text);
-            pendingRestartRef.current = true;
-          }
-        } else {
-          showVoiceStatus(result.error || 'Voice recognition failed. Try again.');
-        }
-      } catch (err) {
-        showVoiceStatus('Voice input error: ' + (err instanceof Error ? err.message : 'Unknown error'));
-      } finally {
-        setIsListening(false);
-        setMicState('ready');
-        manualListeningRef.current = false;
-        window.setTimeout(() => setVoiceStatus(''), 3000);
-      }
+    // In Electron: Always use MediaRecorder in renderer + IPC transcription
+    // This is the most reliable path because:
+    // 1. navigator.mediaDevices.getUserMedia works in renderer context (not preload)
+    // 2. MediaRecorder works in renderer context
+    // 3. IPC transcription calls Groq/OpenAI directly from main process (no backend needed)
+    if (isElectron) {
+      await startRecordedFallback(true);
       return;
     }
 
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
-    if (isElectron || !SpeechRecognition) {
-      // Fallback: MediaRecorder + cloud Whisper
+    // In browser: Try Web Speech API first, then MediaRecorder fallback
+    if (!SpeechRecognition) {
       await startRecordedFallback(true);
       return;
     }

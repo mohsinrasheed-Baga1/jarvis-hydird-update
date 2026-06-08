@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getLogPath: () => ipcRenderer.invoke('get-log-path'),
   getStatus: () => ipcRenderer.invoke('get-status'),
   listenOnce: (language) => ipcRenderer.invoke('listen-once', language),
+  getApiKeyStatus: () => ipcRenderer.invoke('get-api-key-status'),
+  saveApiKeys: (keys) => ipcRenderer.invoke('save-api-keys', keys),
 
   // Navigation
   retryLoad: () => ipcRenderer.send('retry-load'),
@@ -49,51 +51,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openApp: (app) => ipcRenderer.invoke('desktop-action', { type: 'open-app', app }),
   showNotification: (title, body) => ipcRenderer.invoke('desktop-action', { type: 'notification', title, body }),
 
-  // Voice IPC — Direct STT & TTS through main process (reliable in Electron)
+  // ─── Voice IPC — Direct STT & TTS through main process ───
+  // These bypass the renderer's fetch() calls which can fail in Electron
+  // Recording happens in the RENDERER (has proper mic access), transcription in MAIN process
+
+  // Transcribe pre-recorded audio (base64) via Groq/OpenAI Whisper in main process
   transcribeAudioBase64: (base64Audio, language, apiKeys) => ipcRenderer.invoke('transcribe-audio-base64', base64Audio, language, apiKeys),
+
+  // Generate TTS audio via ElevenLabs / OpenAI / Sarvam in main process
   generateTTS: (text, lang, emotion, apiKeys) => ipcRenderer.invoke('tts-generate', text, lang, emotion, apiKeys),
 
-  // Record voice via MediaRecorder in preload context (has proper mic permissions)
-  // Returns { success: true, text: "transcribed text" } or { success: false, error: "..." }
-  recordAndTranscribe: async (language = 'ur', apiKeys = {}) => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      return new Promise((resolve) => {
-        const recorder = new MediaRecorder(stream);
-        const chunks = [];
-        recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-        recorder.onstop = async () => {
-          stream.getTracks().forEach(t => t.stop());
-          const blob = new Blob(chunks, { type: 'audio/webm' });
-          if (blob.size < 500) {
-            resolve({ success: false, error: 'No voice detected. Try again and speak louder.' });
-            return;
-          }
-          try {
-            const reader = new FileReader();
-            reader.onload = async () => {
-              const base64 = reader.result.split(',')[1];
-              const result = await ipcRenderer.invoke('transcribe-audio-base64', base64, language, apiKeys);
-              resolve(result);
-            };
-            reader.onerror = () => resolve({ success: false, error: 'Failed to read audio data' });
-            reader.readAsDataURL(blob);
-          } catch (err) {
-            resolve({ success: false, error: err.message || 'Audio processing failed' });
-          }
-        };
-        recorder.onerror = () => {
-          stream.getTracks().forEach(t => t.stop());
-          resolve({ success: false, error: 'Recording failed' });
-        };
-        recorder.start();
-        // Auto-stop after 8 seconds
-        setTimeout(() => { if (recorder.state === 'recording') recorder.stop(); }, 8000);
-      });
-    } catch (err) {
-      return { success: false, error: err.message || 'Microphone access denied or unavailable' };
-    }
-  },
+  // DEPRECATED: recordAndTranscribe removed - recording must happen in renderer context
+  // where navigator.mediaDevices is available. Use the renderer's MediaRecorder + transcribeAudioBase64 instead.
 
   // Dev tools
   toggleDevTools: () => ipcRenderer.invoke('toggle-devtools'),
