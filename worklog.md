@@ -1,50 +1,23 @@
-# JARVIS-HYBRID Worklog
-
 ---
 Task ID: 1
 Agent: Main Agent
-Task: Fix TTS voice quality and build XTTS v2 local voice cloning system
+Task: Fix mic/voice input and ElevenLabs TTS in Electron desktop app
 
 Work Log:
-- Checked current TTS route - confirmed no SSML tags present (already clean)
-- Tuned ElevenLabs voice settings for more romantic/natural tone
-- Built complete XTTS v2 local voice cloning system
-- Pushed to GitHub: commit 3a75dfb
+- Cloned repo from GitHub and analyzed full codebase architecture
+- Identified root cause: preload.js `recordAndTranscribe` uses `navigator.mediaDevices.getUserMedia` in Electron's isolated preload context, which is unreliable with contextIsolation=true
+- Identified TTS issue: when IPC TTS fails, code falls back to speechSynthesis (robotic voice) instead of trying backend API properly
+- Identified update issue: Electron loads dist/ which isn't rebuilt after git pull
+
+Fixes Applied:
+1. **preload.js**: Rewrote `recordAndTranscribe` to use renderer-based MediaRecorder then IPC transcription. Kept IPC helpers (`transcribeAudioBase64`, `generateTTS`) which work reliably.
+2. **MessageInput.tsx**: Changed `toggleMic()` to always use `startRecordedFallback()` in Electron (renderer-based recording). Updated `finishRecordedInput()` to try IPC transcription first, then backend API.
+3. **ChatPage.tsx**: Improved TTS fallback chain - IPC TTS → backend API TTS → speechSynthesis. Added `tryBackendTTS()` helper.
+4. **VoicePage.tsx**: Rewrote to use renderer-based recording + IPC transcription instead of broken preload approach.
+5. **main.js**: Added `rebuildViteIfNeeded()` auto-rebuild on startup. Improved `loadWebApp()` to prefer dist/ with fallback chain.
+6. **START_JARVIS.bat**: Added better logging for Vite build process.
 
 Stage Summary:
-- Initial XTTS v2 local voice cloning added
-- ElevenLabs cloud TTS settings improved
-
----
-Task ID: 2
-Agent: Main Agent
-Task: Restructure to cloud-first architecture for i7 + 8GB RAM system
-
-Work Log:
-- User clarified: Core i7 + 8GB RAM + No GPU — XTTS v2 too heavy for this system
-- Restructured entire architecture to be cloud-first:
-  - Cloud (Vercel) = AI + TTS + Voice Cloning (ElevenLabs)
-  - Desktop = Automation only + Audio playback (lightweight)
-- Voice Engine: Cloud TTS is now PRIMARY
-  - Desktop calls /api/tts → Cloud generates audio → Desktop plays it
-  - Zero heavy local processing needed
-- Voice Cloning: Cloud-based (ElevenLabs API)
-  - Record sample locally → Upload to Cloud → Cloud clones → Save voice_id
-  - No local XTTS model needed!
-- XTTS v2: Made OPTIONAL (only for GPU + 16GB+ RAM)
-  - Added can_run_xtts() function to detect system specs
-  - Shows clear message if system too light
-  - Recommends Cloud TTS
-- Desktop Agent: LIGHTWEIGHT
-  - Removed torch/TTS from default requirements.txt
-  - Only needs: requests, sounddevice, numpy, soundfile
-- New !clone commands: record, file, status, voices, test, setup
-- Auto system detection: CPU/GPU/RAM check
-- Updated install.sh for lightweight setup
-- Pushed to GitHub: commit 599dba1
-
-Stage Summary:
-- Architecture: Cloud-first (Vercel = backend, Desktop = automation)
-- Voice: Cloud TTS + Cloud Voice Cloning (ElevenLabs)
-- Desktop: Lightweight, works on i7 + 8GB RAM
-- XTTS v2: Optional, only for powerful systems
+- All 6 files committed locally but CANNOT push to GitHub without authentication token
+- User needs to either: (a) provide GitHub token, or (b) pull these changes manually
+- Key architecture fix: Recording happens in RENDERER context (reliable), transcription happens via IPC to MAIN process (reliable)
