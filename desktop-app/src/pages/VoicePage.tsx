@@ -10,6 +10,7 @@ export default function VoicePage() {
   const recognitionRef = useRef<any>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const transcribeFallback = async () => {
     const audio = new Blob(chunksRef.current, { type: 'audio/webm' });
@@ -40,13 +41,37 @@ export default function VoicePage() {
   };
 
   const startListening = async () => {
-    // In Electron, webkitSpeechRecognition doesn't work.
-    // Always use MediaRecorder + cloud Whisper for reliable voice input.
-    const isElectron = !!(window as any).electronAPI;
+    const electronAPI = (window as any).electronAPI;
+    const isElectron = !!electronAPI;
+
+    // In Electron: Use IPC-based recording + transcription (most reliable)
+    if (isElectron && electronAPI.recordAndTranscribe) {
+      setTranscript('');
+      setStatus('Recording... Speak now');
+      setIsListening(true);
+      try {
+        const apiKeys = storageService.getApiKeys();
+        const lang = language === 'en' ? 'en' : 'ur';
+        const result = await electronAPI.recordAndTranscribe(lang, apiKeys);
+        if (result.success && result.text) {
+          setTranscript(result.text);
+          setStatus('Voice captured successfully!');
+        } else {
+          setStatus(result.error || 'Voice recognition failed. Try again.');
+        }
+      } catch (err) {
+        setStatus('Voice input error: ' + (err instanceof Error ? err.message : 'Unknown'));
+      } finally {
+        setIsListening(false);
+        window.setTimeout(() => setStatus(''), 4000);
+      }
+      return;
+    }
+
+    // Browser mode: use native SpeechRecognition API
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
     if (!isElectron && SpeechRecognition) {
-      // Browser mode: use native SpeechRecognition API
       const recognition = new SpeechRecognition();
       recognition.lang = language === 'en' ? 'en-US' : 'ur-PK';
       recognition.interimResults = true;
@@ -65,7 +90,7 @@ export default function VoicePage() {
       return;
     }
 
-    // Electron or fallback: use MediaRecorder + cloud Whisper API
+    // Fallback: MediaRecorder + cloud Whisper API
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
@@ -100,6 +125,33 @@ export default function VoicePage() {
   const speakTranscript = async () => {
     const text = transcript || 'Voice output is working.';
     setStatus('Creating natural voice...');
+
+    // In Electron: Try IPC-based TTS first (most reliable)
+    const electronAPI = (window as any).electronAPI;
+    if (electronAPI?.generateTTS) {
+      try {
+        const apiKeys = storageService.getApiKeys();
+        const lang = language === 'en' ? 'en' : 'ur';
+        const result = await electronAPI.generateTTS(text, lang, 'normal', apiKeys);
+        if (result.success && result.audioBase64) {
+          const audioUrl = `data:${result.contentType};base64,${result.audioBase64}`;
+          audioRef.current?.pause();
+          audioRef.current = new Audio(audioUrl);
+          audioRef.current.onended = () => setStatus('');
+          audioRef.current.onerror = () => {
+            // Fall back to voice service
+            voiceService.speak(text, lang, apiKeys).then(() => setStatus('')).catch(() => setStatus('Voice output failed.'));
+          };
+          await audioRef.current.play();
+          setStatus('Speaking...');
+          return;
+        }
+      } catch {
+        // Fall through to voice service
+      }
+    }
+
+    // Fallback: voice service
     try {
       await voiceService.speak(text, language === 'en' ? 'en' : 'ur', storageService.getApiKeys());
       setStatus('');
@@ -113,7 +165,7 @@ export default function VoicePage() {
       <div className="max-w-2xl mx-auto space-y-6">
         <div>
           <h1 className="text-3xl font-bold text-white mb-2">Voice</h1>
-          <p className="text-slate-400">Use browser speech recognition when available, with microphone permission fallback.</p>
+          <p className="text-slate-400">Record your voice and transcribe using cloud AI. Speak clearly after clicking the mic.</p>
         </div>
 
         <section className="bg-slate-900 border border-slate-700 rounded-lg p-8 text-center space-y-4">
@@ -125,7 +177,7 @@ export default function VoicePage() {
           >
             {isListening ? 'Stop' : 'Mic'}
           </button>
-          <p className="text-slate-300">{isListening ? 'Listening...' : 'Ready'}</p>
+          <p className="text-slate-300">{isListening ? 'Recording... Speak now (8 seconds)' : 'Ready'}</p>
           {status && <p className="text-sm text-slate-400">{status}</p>}
         </section>
 
@@ -140,7 +192,7 @@ export default function VoicePage() {
             <option value="en">English</option>
             <option value="mixed">Mixed</option>
           </select>
-          <button onClick={speakTranscript} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg">
+          <button onClick={speakTranscript} className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg">
             Test voice output
           </button>
         </section>

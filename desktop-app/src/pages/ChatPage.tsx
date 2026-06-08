@@ -121,7 +121,42 @@ export default function ChatPage({ backend }: ChatPageProps) {
     try {
       setSpeechStatus('Creating natural voice...');
       const prefs = storageService.getPreferences();
-      const blob = await apiClient.textToSpeech(text, storageService.getApiKeys(), prefs.language === 'en' ? 'en' : 'ur', emotion);
+      const apiKeys = storageService.getApiKeys();
+      const lang = prefs.language === 'en' ? 'en' : 'ur';
+
+      // In Electron: Try IPC-based TTS first (most reliable)
+      const electronAPI = (window as any).electronAPI;
+      if (electronAPI?.generateTTS) {
+        try {
+          const ttsResult = await electronAPI.generateTTS(text, lang, emotion, apiKeys);
+          if (ttsResult.success && ttsResult.audioBase64) {
+            const audioUrl = `data:${ttsResult.contentType};base64,${ttsResult.audioBase64}`;
+            audioRef.current?.pause();
+            audioRef.current = new Audio(audioUrl);
+            audioRef.current.onplay = () => setSpeechStatus('Speaking...');
+            audioRef.current.onended = () => setSpeechStatus('');
+            audioRef.current.onerror = () => {
+              // IPC TTS failed to play, try backend API
+              apiClient.textToSpeech(text, apiKeys, lang, emotion).then(blob => {
+                const url = URL.createObjectURL(blob);
+                audioRef.current = new Audio(url);
+                audioRef.current.onplay = () => setSpeechStatus('Speaking...');
+                audioRef.current.onended = () => { setSpeechStatus(''); URL.revokeObjectURL(url); };
+                audioRef.current.onerror = () => { URL.revokeObjectURL(url); fallbackSpeakAssistantResponse(text); };
+                audioRef.current.play().catch(() => fallbackSpeakAssistantResponse(text));
+              }).catch(() => fallbackSpeakAssistantResponse(text));
+            };
+            await audioRef.current.play();
+            return;
+          }
+        } catch (ipcErr) {
+          // IPC TTS failed, fall through to backend API
+          console.warn('IPC TTS failed, trying backend:', ipcErr);
+        }
+      }
+
+      // Backend API TTS
+      const blob = await apiClient.textToSpeech(text, apiKeys, lang, emotion);
       const url = URL.createObjectURL(blob);
       audioRef.current?.pause();
       audioRef.current = new Audio(url);

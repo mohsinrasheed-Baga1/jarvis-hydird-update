@@ -721,6 +721,245 @@ ipcMain.handle('desktop-action', async (_, action = {}) => {
   }
 });
 
+// ─── Voice IPC: Direct STT & TTS from Main Process ───
+// These bypass the renderer's fetch() calls which can fail in Electron
+
+function buildMultipart(fields, boundary) {
+  const parts = [];
+  for (const [name, value] of Object.entries(fields)) {
+    if (value && typeof value === 'object' && value.filename) {
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${value.filename}"\r\nContent-Type: ${value.contentType || 'application/octet-stream'}\r\n\r\n`, 'utf8'));
+      parts.push(Buffer.isBuffer(value.data) ? value.data : Buffer.from(value.data));
+      parts.push(Buffer.from('\r\n', 'utf8'));
+    } else {
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`, 'utf8'));
+    }
+  }
+  parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+  return Buffer.concat(parts);
+}
+
+function httpsPostBuffer(urlStr, body, headers) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(urlStr);
+    const mod = parsedUrl.protocol === 'http:' ? require('http') : require('https');
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (parsedUrl.protocol === 'http:' ? 80 : 443),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: 'POST',
+      headers: { ...headers, 'Content-Length': body.length },
+    };
+    const req = mod.request(options, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const data = Buffer.concat(chunks);
+        resolve({ statusCode: res.statusCode, headers: res.headers, data });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(30000, () => { req.destroy(new Error('Request timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
+
+// IPC: Transcribe audio (base64) via Groq/OpenAI Whisper
+ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur', apiKeys = {}) => {
+  try {
+    const audioBuffer = Buffer.from(base64Audio, 'base64');
+    const groqKey = apiKeys.groq || process.env.GROQ_API_KEY || '';
+    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+
+    if (!groqKey && !openaiKey) {
+      return { success: false, error: 'Groq or OpenAI API key required for voice transcription' };
+    }
+
+    // Try Groq Whisper first (fastest, cheapest)
+    if (groqKey) {
+      try {
+        const boundary = '----JarvisSTT' + Date.now();
+        const body = buildMultipart({
+          file: { data: audioBuffer, filename: 'voice.webm', contentType: 'audio/webm' },
+          model: 'whisper-large-v3-turbo',
+          ...(language === 'ur' ? { language: 'ur' } : language === 'en' ? { language: 'en' } : {}),
+        }, boundary);
+
+        const result = await httpsPostBuffer('https://api.groq.com/openai/v1/audio/transcriptions', body, {
+          'Authorization': `Bearer ${groqKey}`,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        });
+
+        if (result.statusCode === 200) {
+          const json = JSON.parse(result.data.toString('utf8'));
+          if (json.text && json.text.trim()) {
+            log('INFO', '[STT-IPC] Groq Whisper success:', json.text.substring(0, 60));
+            return { success: true, text: json.text.trim(), method: 'groq-whisper-ipc' };
+          }
+        }
+        log('WARN', '[STT-IPC] Groq failed:', result.statusCode);
+      } catch (err) {
+        log('WARN', '[STT-IPC] Groq error:', err.message);
+      }
+    }
+
+    // Try OpenAI Whisper
+    if (openaiKey) {
+      try {
+        const boundary = '----JarvisSTT' + Date.now();
+        const body = buildMultipart({
+          file: { data: audioBuffer, filename: 'voice.webm', contentType: 'audio/webm' },
+          model: 'whisper-1',
+          ...(language === 'ur' ? { language: 'ur' } : language === 'en' ? { language: 'en' } : {}),
+        }, boundary);
+
+        const result = await httpsPostBuffer('https://api.openai.com/v1/audio/transcriptions', body, {
+          'Authorization': `Bearer ${openaiKey}`,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        });
+
+        if (result.statusCode === 200) {
+          const json = JSON.parse(result.data.toString('utf8'));
+          if (json.text && json.text.trim()) {
+            log('INFO', '[STT-IPC] OpenAI Whisper success:', json.text.substring(0, 60));
+            return { success: true, text: json.text.trim(), method: 'openai-whisper-ipc' };
+          }
+        }
+        log('WARN', '[STT-IPC] OpenAI failed:', result.statusCode);
+      } catch (err) {
+        log('WARN', '[STT-IPC] OpenAI error:', err.message);
+      }
+    }
+
+    return { success: false, error: 'All transcription providers failed. Check API keys.' };
+  } catch (err) {
+    log('ERROR', '[STT-IPC] Error:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: Generate TTS audio via ElevenLabs / OpenAI / Sarvam
+ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', apiKeys = {}) => {
+  try {
+    const elevenlabsKey = apiKeys.elevenlabs || process.env.ELEVENLABS_API_KEY || '';
+    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+    const sarvamKey = apiKeys.sarvam || process.env.SARVAM_API_KEY || '';
+
+    // Try ElevenLabs Turbo v2.5 first
+    if (elevenlabsKey) {
+      try {
+        const voiceIds = { ur: 'Xb7hH8MSUJpWjnnlVkGX', en: 'EXAVITQu4vr4xnSDxMaL' };
+        const voiceId = voiceIds[lang] || voiceIds.ur;
+        const emotionSettings = {
+          happy: { stability: 0.35, similarity: 0.75, style: 0.8 },
+          serious: { stability: 0.55, similarity: 0.8, style: 0.4 },
+          sympathetic: { stability: 0.5, similarity: 0.78, style: 0.6 },
+          surprised: { stability: 0.3, similarity: 0.72, style: 0.85 },
+          encouraging: { stability: 0.4, similarity: 0.76, style: 0.7 },
+          normal: { stability: 0.4, similarity: 0.78, style: 0.55 },
+        };
+        const settings = emotionSettings[emotion] || emotionSettings.normal;
+        const bodyStr = JSON.stringify({
+          text: text.substring(0, 5000),
+          model_id: 'eleven_turbo_v2_5',
+          voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, style: settings.style, use_speaker_boost: true },
+          output_format: 'mp3_44100_128',
+        });
+
+        const result = await httpsPostBuffer(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, Buffer.from(bodyStr, 'utf8'), {
+          'Content-Type': 'application/json',
+          'xi-api-key': elevenlabsKey,
+          'Accept': 'audio/mpeg',
+        });
+
+        if (result.statusCode === 200 && result.data.length > 500) {
+          log('INFO', '[TTS-IPC] ElevenLabs success, size:', result.data.length);
+          return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'elevenlabs-ipc' };
+        }
+        log('WARN', '[TTS-IPC] ElevenLabs failed:', result.statusCode, 'size:', result.data.length);
+      } catch (err) {
+        log('WARN', '[TTS-IPC] ElevenLabs error:', err.message);
+      }
+    }
+
+    // Try OpenAI TTS HD
+    if (openaiKey) {
+      try {
+        const bodyStr = JSON.stringify({
+          model: 'tts-1-hd',
+          input: text.substring(0, 4096),
+          voice: lang === 'ur' ? 'alloy' : 'nova',
+          speed: 1.0,
+        });
+
+        const result = await httpsPostBuffer('https://api.openai.com/v1/audio/speech', Buffer.from(bodyStr, 'utf8'), {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${openaiKey}`,
+        });
+
+        if (result.statusCode === 200 && result.data.length > 500) {
+          log('INFO', '[TTS-IPC] OpenAI TTS success, size:', result.data.length);
+          return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'openai-tts-ipc' };
+        }
+        log('WARN', '[TTS-IPC] OpenAI TTS failed:', result.statusCode);
+      } catch (err) {
+        log('WARN', '[TTS-IPC] OpenAI TTS error:', err.message);
+      }
+    }
+
+    // Try Sarvam AI
+    if (sarvamKey) {
+      try {
+        const targetLang = lang === 'ur' ? 'hi-IN' : 'en';
+        const bodyStr = JSON.stringify({
+          inputs: [text.substring(0, 3000)],
+          target_language_code: targetLang,
+          speaker_id: 'anushka',
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.5,
+          speech_sample_rate: 24000,
+          enable_preprocessing: true,
+          model: 'bulbul:v1',
+        });
+
+        const result = await httpsPostBuffer('https://api.sarvam.ai/text-to-speech', Buffer.from(bodyStr, 'utf8'), {
+          'Content-Type': 'application/json',
+          'api-subscription-key': sarvamKey,
+        });
+
+        if (result.statusCode === 200) {
+          // Sarvam may return JSON with base64 audio
+          try {
+            const json = JSON.parse(result.data.toString('utf8'));
+            if (json.audios && json.audios[0]) {
+              const audioBuffer = Buffer.from(json.audios[0], 'base64');
+              if (audioBuffer.length > 500) {
+                log('INFO', '[TTS-IPC] Sarvam AI success, size:', audioBuffer.length);
+                return { success: true, audioBase64: audioBuffer.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
+              }
+            }
+          } catch {}
+          // Or direct audio
+          if (result.data.length > 500) {
+            log('INFO', '[TTS-IPC] Sarvam AI direct audio, size:', result.data.length);
+            return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
+          }
+        }
+        log('WARN', '[TTS-IPC] Sarvam failed:', result.statusCode);
+      } catch (err) {
+        log('WARN', '[TTS-IPC] Sarvam error:', err.message);
+      }
+    }
+
+    return { success: false, error: 'TTS providers unavailable. Set ElevenLabs, OpenAI, or Sarvam key in Settings.' };
+  } catch (err) {
+    log('ERROR', '[TTS-IPC] Error:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
 // ─── App Lifecycle ───
 app.whenReady().then(async () => {
   log('INFO', 'App ready');
