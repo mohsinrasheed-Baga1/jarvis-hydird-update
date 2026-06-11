@@ -67,8 +67,7 @@
       {
         "from": "../.venv",
         "to": ".venv",
-        "filter": ["**/*"],
-        "optional": true
+        "filter": ["**/*"]
       },
       {
         "from": "assets",
@@ -109,7 +108,6 @@
     "portable": {
       "artifactName": "JARVIS-Hybrid-Portable-${version}.exe"
     },
-    "forceDevUpdateConfig": true,
     "linux": {
       "icon": "assets/icon.png",
       "target": ["AppImage", "deb"]
