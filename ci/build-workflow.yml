@@ -1,0 +1,64 @@
+# ============================================================
+# JARVIS Hybrid — GitHub Actions Build & Release Workflow
+# ============================================================
+# TO ACTIVATE: Move this file to .github/workflows/build.yml
+# Either via GitHub Web UI or with a token that has 'workflow' scope
+# ============================================================
+
+name: Build & Release JARVIS
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    strategy:
+      matrix:
+        node-version: [20]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: desktop-app/package-lock.json
+
+      - name: Install desktop-app dependencies
+        working-directory: desktop-app
+        run: npm ci
+
+      - name: Build React (Vite)
+        working-directory: desktop-app
+        run: npx vite build
+
+      - name: Build & Publish Electron (NSIS + Portable)
+        working-directory: desktop-app
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --x64 --publish always
+
+      - name: List release artifacts
+        working-directory: desktop-app
+        run: |
+          Write-Host "=== Release Output ==="
+          if (Test-Path "release") {
+            Get-ChildItem -Recurse release | ForEach-Object { Write-Host $_.FullName }
+          } else {
+            Write-Host "No release directory found"
+          }
+
+      - name: Upload artifacts (debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-win-build
+          path: desktop-app/release/**/*
+          retention-days: 30
