@@ -31,7 +31,13 @@ try {
 const CLOUD_APP_URL = 'http://127.0.0.1:3000';
 const VITE_DEV_URL = 'http://127.0.0.1:5173';
 const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
-const APP_VERSION = '2.3.0';
+// Dynamic version: read from package.json, never hardcode
+const APP_VERSION = app.getVersion ? app.getVersion() : (function() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    return pkg.version || '2.4.0';
+  } catch { return '2.4.0'; }
+})();
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
 const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
 const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
@@ -459,21 +465,273 @@ function cleanupProcesses() {
   }
 }
 
-// ─── Auto-Updater ───
+// ─── Auto-Updater (Complete Production System) ───
 let autoUpdater = null;
+let updaterState = {
+  status: 'idle',          // idle | checking | available | downloading | downloaded | up-to-date | error | dev-mode
+  latestVersion: null,
+  downloadProgress: null,   // { percent, bytesPerSecond, transferred, total }
+  lastChecked: null,
+  lastError: null,
+  updateInfo: null,
+  ghTokenLoaded: false,
+  feedUrlConfigured: false,
+};
+const updaterLogEntries = [];
+const MAX_UPDATER_LOG = 200;
+
+function updaterLog(level, ...args) {
+  const ts = new Date().toISOString();
+  const entry = `[${ts}] [${level}] ${args.map(formatLogArg).join(' ')}`;
+  updaterLogEntries.push(entry);
+  if (updaterLogEntries.length > MAX_UPDATER_LOG) updaterLogEntries.shift();
+  log(level === 'ERROR' ? 'ERROR' : level === 'WARN' ? 'WARN' : 'INFO', '[Updater]', ...args);
+}
+
+// ─── Private Repo Token Handling ───
+// Load GitHub token from safe locations (NOT hardcoded in source)
+function loadGHToken() {
+  // Try multiple safe locations
+  const tokenLocations = [
+    // 1. Environment variable (set by CI or user)
+    process.env.GH_TOKEN,
+    process.env.GITHUB_TOKEN,
+    // 2. Config in userData (safe, user-specific)
+    path.join(app.getPath('userData'), 'gh-token.json'),
+    // 3. Config in electron folder (build-time injection)
+    path.join(__dirname, 'config.json'),
+    // 4. Config in resources (build-time injection)
+    path.join(process.resourcesPath, 'config.json'),
+  ];
+
+  for (const loc of tokenLocations) {
+    if (!loc) continue;
+    // If it's a direct env var value
+    if (typeof loc === 'string' && (loc.startsWith('ghp_') || loc.startsWith('github_pat_'))) {
+      updaterLog('INFO', 'GH_TOKEN loaded from environment variable');
+      updaterState.ghTokenLoaded = true;
+      return loc;
+    }
+    // If it's a file path, try reading it
+    try {
+      if (fs.existsSync(loc)) {
+        const data = JSON.parse(fs.readFileSync(loc, 'utf8'));
+        if (data.ghToken || data.GH_TOKEN) {
+          updaterLog('INFO', 'GH_TOKEN loaded from file:', path.basename(loc));
+          updaterState.ghTokenLoaded = true;
+          return data.ghToken || data.GH_TOKEN;
+        }
+      }
+    } catch {}
+  }
+
+  updaterLog('WARN', 'No GH_TOKEN found in any safe location');
+  updaterState.ghTokenLoaded = false;
+  return null;
+}
+
 try {
   const { autoUpdater: au } = require('electron-updater');
   autoUpdater = au;
+
+  // Load private repo token
+  const ghToken = loadGHToken();
+  if (ghToken && autoUpdater) {
+    // For private repos, set the token in the request headers
+    autoUpdater.requestHeaders = {
+      Authorization: `token ${ghToken}`,
+    };
+    updaterLog('INFO', 'Private repo token configured for updater');
+  }
+
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.logger = {
-    info: (...a) => log('INFO', '[Updater]', ...a),
-    error: (...a) => log('ERROR', '[Updater]', ...a),
-    warn: (...a) => log('WARN', '[Updater]', ...a),
+
+  // Configure feed URL for private repo
+  const repoConfig = {
+    owner: 'mohsinrasheed-Baga1',
+    repo: 'jarvis-hydird-update',
   };
-  log('INFO', 'electron-updater loaded');
+
+  // Set up dynamic feed URL with token for private repos
+  if (ghToken) {
+    autoUpdater.setFeedURL({
+      provider: 'github',
+      owner: repoConfig.owner,
+      repo: repoConfig.repo,
+      token: ghToken,
+      releaseType: 'release',
+      private: true,
+    });
+    updaterState.feedUrlConfigured = true;
+    updaterLog('INFO', 'Feed URL configured for private repo with token');
+  } else {
+    // Public repo - electron-updater reads from package.json build.publish
+    updaterState.feedUrlConfigured = true;
+    updaterLog('INFO', 'Feed URL using package.json publish config');
+  }
+
+  autoUpdater.logger = {
+    info: (...a) => updaterLog('INFO', ...a),
+    error: (...a) => updaterLog('ERROR', ...a),
+    warn: (...a) => updaterLog('WARN', ...a),
+  };
+
+  updaterLog('INFO', 'electron-updater loaded successfully');
+  updaterLog('INFO', 'Current version:', APP_VERSION);
+  updaterLog('INFO', 'App packaged:', app.isPackaged);
+  updaterLog('INFO', 'Feed URL configured:', updaterState.feedUrlConfigured);
+  updaterLog('INFO', 'GH token loaded:', updaterState.ghTokenLoaded);
 } catch (err) {
-  log('WARN', 'electron-updater not available:', err.message);
+  updaterLog('ERROR', 'electron-updater not available:', err.message);
+}
+
+function sendUpdateStatus(data = {}) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('update-status', { ...data, currentVersion: APP_VERSION });
+  }
+}
+
+function getUpdateDiagnostics() {
+  return {
+    currentVersion: APP_VERSION,
+    latestVersion: updaterState.latestVersion,
+    status: updaterState.status,
+    lastChecked: updaterState.lastChecked,
+    downloadProgress: updaterState.downloadProgress,
+    ghTokenLoaded: updaterState.ghTokenLoaded,
+    feedUrlConfigured: updaterState.feedUrlConfigured,
+    lastError: updaterState.lastError,
+    logPath: logFile,
+    appPackaged: app.isPackaged,
+    platform: process.platform,
+    arch: process.arch,
+  };
+}
+
+// ─── Check for updates ───
+function checkForUpdates() {
+  if (!app.isPackaged) {
+    updaterLog('INFO', 'Skipping update check (dev mode / not packaged)');
+    updaterState.status = 'dev-mode';
+    sendUpdateStatus({ status: 'dev-mode' });
+    return;
+  }
+  if (!autoUpdater) {
+    updaterLog('WARN', 'Auto-updater not available');
+    updaterState.status = 'error';
+    updaterState.lastError = 'Auto-updater not available';
+    sendUpdateStatus({ status: 'error', message: 'Auto-updater not available' });
+    return;
+  }
+  updaterLog('INFO', 'Checking for updates...');
+  updaterState.status = 'checking';
+  updaterState.lastError = null;
+  sendUpdateStatus({ status: 'checking' });
+
+  autoUpdater.checkForUpdates().then(result => {
+    updaterState.lastChecked = new Date().toISOString();
+    if (result) {
+      updaterLog('INFO', 'Update check result - current:', APP_VERSION, 'latest:', result.updateInfo?.version);
+    }
+  }).catch(err => {
+    updaterLog('ERROR', 'Update check failed:', err.message);
+    updaterState.status = 'error';
+    updaterState.lastError = err.message;
+    sendUpdateStatus({ status: 'error', message: err.message });
+  });
+}
+
+// ─── Auto-updater event handlers ───
+if (autoUpdater) {
+  autoUpdater.on('checking-for-update', () => {
+    updaterLog('INFO', 'Checking for update...');
+    updaterState.status = 'checking';
+    sendUpdateStatus({ status: 'checking' });
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    updaterLog('INFO', 'Update available:', info.version, 'releaseDate:', info.releaseDate);
+    updaterState.status = 'available';
+    updaterState.latestVersion = info.version;
+    updaterState.updateInfo = info;
+    sendUpdateStatus({ status: 'available', version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes });
+  });
+
+  autoUpdater.on('update-not-available', (info) => {
+    updaterLog('INFO', 'Update not available. Current version is latest:', APP_VERSION);
+    updaterState.status = 'up-to-date';
+    updaterState.lastChecked = new Date().toISOString();
+    sendUpdateStatus({ status: 'up-to-date', version: APP_VERSION });
+  });
+
+  autoUpdater.on('download-progress', (progressObj) => {
+    const progress = {
+      percent: Math.round(progressObj.percent),
+      bytesPerSecond: progressObj.bytesPerSecond,
+      transferred: progressObj.transferred,
+      total: progressObj.total,
+      speed: Math.round(progressObj.bytesPerSecond / 1024) + ' KB/s',
+    };
+    updaterState.status = 'downloading';
+    updaterState.downloadProgress = progress;
+    // Only log every 10% to avoid log spam
+    if (progress.percent % 10 === 0 || progress.percent >= 95) {
+      updaterLog('INFO', `Download progress: ${progress.percent}% (${progress.speed})`);
+    }
+    sendUpdateStatus({ status: 'downloading', percent: progress.percent, speed: progress.speed, transferred: progress.transferred, total: progress.total });
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    updaterLog('INFO', 'Update downloaded successfully:', info.version);
+    updaterLog('INFO', 'Update will install on app quit, or user can trigger restart');
+    updaterState.status = 'downloaded';
+    updaterState.latestVersion = info.version;
+    updateDownloaded = true;
+    sendUpdateStatus({ status: 'downloaded', version: info.version });
+    try {
+      if (Notification.isSupported()) {
+        const n = new Notification({
+          title: 'JARVIS Update Ready',
+          body: `v${info.version} downloaded. Restart to install.`,
+          icon: getIconPath()
+        });
+        n.show();
+        n.on('click', () => { installUpdateNow(); });
+      }
+    } catch {}
+  });
+
+  autoUpdater.on('error', (err) => {
+    updaterLog('ERROR', 'Auto-updater error:', err.message);
+    updaterLog('ERROR', 'Error stack:', err.stack || 'No stack trace');
+    updaterState.status = 'error';
+    updaterState.lastError = err.message;
+    sendUpdateStatus({ status: 'error', message: err.message });
+  });
+}
+
+// ─── Install update now ───
+function installUpdateNow() {
+  if (!autoUpdater || !updateDownloaded) {
+    updaterLog('WARN', 'Cannot install: no update downloaded');
+    return;
+  }
+  updaterLog('INFO', 'Installing update and restarting...');
+  isQuitting = true;
+  autoUpdater.quitAndInstall(false, true);
+}
+
+// ─── Periodic update check ───
+let periodicUpdateTimer = null;
+function startPeriodicUpdateCheck() {
+  if (periodicUpdateTimer) clearInterval(periodicUpdateTimer);
+  periodicUpdateTimer = setInterval(() => {
+    if (app.isPackaged && autoUpdater) {
+      updaterLog('INFO', 'Periodic update check triggered');
+      checkForUpdates();
+    }
+  }, VERSION_CHECK_INTERVAL);
 }
 
 // ─── State ───
@@ -660,65 +918,22 @@ function createTray() {
   } catch (err) { log('WARN', 'Failed to create tray:', err.message); trayCreated = false; }
 }
 
-// ─── Auto-Update ───
-function checkForUpdates() {
-  if (!app.isPackaged) {
-    log('INFO', 'Skipping update check (dev mode)');
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'dev-mode' });
-    return;
-  }
-  if (!autoUpdater) {
-    log('WARN', 'Auto-updater not available');
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'not-available' });
-    return;
-  }
-  log('INFO', 'Checking for updates...');
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'checking' });
-  autoUpdater.checkForUpdates().catch(err => {
-    log('ERROR', 'Update check failed:', err.message);
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'error', message: err.message });
-  });
-}
-
-if (autoUpdater) {
-  autoUpdater.on('update-available', (info) => {
-    log('INFO', 'Update available:', info.version);
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'available', version: info.version });
-  });
-  autoUpdater.on('download-progress', (p) => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'downloading', percent: Math.round(p.percent), speed: Math.round(p.bytesPerSecond / 1024) + ' KB/s' });
-  });
-  autoUpdater.on('update-downloaded', (info) => {
-    log('INFO', 'Update downloaded:', info.version);
-    updateDownloaded = true;
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'downloaded', version: info.version });
-    try {
-      if (Notification.isSupported()) {
-        const n = new Notification({ title: 'JARVIS Update Ready', body: `v${info.version} downloaded. Restart to install.`, icon: getIconPath() });
-        n.show(); n.on('click', () => { isQuitting = true; autoUpdater.quitAndInstall(false, true); });
-      }
-    } catch {}
-  });
-  autoUpdater.on('update-not-available', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'up-to-date', version: APP_VERSION });
-  });
-  autoUpdater.on('error', (err) => {
-    log('ERROR', 'Auto-updater error:', err.message);
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'error', message: err.message });
-  });
-}
+// ─── Auto-Update handlers are in the updater section above ───
 
 // ─── IPC Handlers ───
 ipcMain.on('window-minimize', () => { if (mainWindow) mainWindow.minimize(); });
 ipcMain.on('window-maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
 ipcMain.on('window-close', () => { if (!mainWindow) return; if (trayCreated) mainWindow.hide(); else { isQuitting = true; mainWindow.close(); } });
 ipcMain.on('check-for-updates', () => checkForUpdates());
-ipcMain.on('install-update', () => { if (autoUpdater && updateDownloaded) { isQuitting = true; autoUpdater.quitAndInstall(false, true); } });
+ipcMain.on('install-update', () => installUpdateNow());
+ipcMain.handle('get-app-version', () => APP_VERSION);
+ipcMain.handle('get-update-diagnostics', () => getUpdateDiagnostics());
+ipcMain.handle('get-update-log', () => updaterLogEntries.join('\n'));
+ipcMain.handle('install-update-now', () => installUpdateNow());
 ipcMain.on('retry-load', () => loadWebApp());
 ipcMain.on('reload-page', () => { if (mainWindow) mainWindow.reload(); });
 ipcMain.on('hard-refresh', () => hardRefresh());
 ipcMain.on('clear-cache', async () => { await clearBrowserCache(); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('cache-cleared', { success: true }); });
-ipcMain.handle('get-app-version', () => APP_VERSION);
 ipcMain.handle('toggle-devtools', () => { if (mainWindow) mainWindow.webContents.toggleDevTools(); });
 ipcMain.handle('get-log-path', () => logFile);
 ipcMain.handle('is-desktop', () => true);
@@ -1212,8 +1427,16 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
 
-  setTimeout(() => { if (app.isPackaged) checkForUpdates(); }, 15000);
-  setInterval(() => { if (app.isPackaged) checkForUpdates(); }, 30 * 60 * 1000);
+  // ─── Auto-update: check on startup after 5s delay ───
+  if (app.isPackaged) {
+    log('INFO', 'App is packaged — scheduling initial update check in 5 seconds...');
+    setTimeout(() => {
+      checkForUpdates();
+      startPeriodicUpdateCheck();
+    }, 5000);
+  } else {
+    log('INFO', 'App is NOT packaged — skipping auto-update check on startup');
+  }
   setInterval(() => { if (loadFailed && isOnline()) loadWebApp(); }, 10000);
 }).catch(err => { dialog.showErrorBox('JARVIS Error', err.message); app.quit(); });
 

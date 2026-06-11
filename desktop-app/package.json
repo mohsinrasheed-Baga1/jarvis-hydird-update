@@ -1,6 +1,6 @@
 {
   "name": "jarvis-hybrid",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "description": "JARVIS Hybrid - AI Desktop Assistant with Voice & Automation",
   "main": "electron/main.js",
   "private": true,
@@ -87,7 +87,7 @@
           "arch": ["x64"]
         }
       ],
-      "artifactName": "JARVIS-Hybrid-Setup-${version}-${arch}.${ext}"
+      "artifactName": "JARVIS-Hybrid-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -109,6 +109,7 @@
     "portable": {
       "artifactName": "JARVIS-Hybrid-Portable-${version}.exe"
     },
+    "forceDevUpdateConfig": true,
     "linux": {
       "icon": "assets/icon.png",
       "target": ["AppImage", "deb"]

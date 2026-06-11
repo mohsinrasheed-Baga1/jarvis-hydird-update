@@ -44,3 +44,8 @@ venv/
 desktop-app/node_modules/
 desktop-app/dist/
 desktop-app/release/
+
+# Never commit GitHub tokens or config with secrets
+desktop-app/electron/config.json
+**/gh-token.json
+desktop-app/.env

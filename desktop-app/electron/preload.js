@@ -23,9 +23,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hardRefresh: () => ipcRenderer.send('hard-refresh'),
   clearCache: () => ipcRenderer.send('clear-cache'),
 
-  // Auto-update
+  // ─── Auto-Update IPC ───
   checkForUpdates: () => ipcRenderer.send('check-for-updates'),
   installUpdate: () => ipcRenderer.send('install-update'),
+  installUpdateNow: () => ipcRenderer.invoke('install-update-now'),
+  getUpdateDiagnostics: () => ipcRenderer.invoke('get-update-diagnostics'),
+  getUpdateLog: () => ipcRenderer.invoke('get-update-log'),
   onUpdateStatus: (cb) => { ipcRenderer.removeAllListeners('update-status'); ipcRenderer.on('update-status', (_, d) => cb(d)); },
   onWebUpdated: (cb) => { ipcRenderer.on('web-updated', (_, d) => cb(d)); },
   onCacheCleared: (cb) => { ipcRenderer.on('cache-cleared', (_, d) => cb(d)); },
@@ -64,9 +67,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Direct chat completion via Groq/Gemini/OpenAI (bypasses Next.js backend)
   // This makes the app self-sufficient - chat works without backend running
   chatCompletion: (message, conversationHistory, activeProvider, apiKeys) => ipcRenderer.invoke('chat-completion', message, conversationHistory, activeProvider, apiKeys),
-
-  // DEPRECATED: recordAndTranscribe removed - recording must happen in renderer context
-  // where navigator.mediaDevices is available. Use the renderer's MediaRecorder + transcribeAudioBase64 instead.
 
   // Dev tools
   toggleDevTools: () => ipcRenderer.invoke('toggle-devtools'),
