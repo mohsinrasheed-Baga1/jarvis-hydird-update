@@ -652,6 +652,21 @@ if (autoUpdater) {
 
   autoUpdater.on('update-available', (info) => {
     updaterLog('INFO', 'Update available:', info.version, 'releaseDate:', info.releaseDate);
+
+    // ─── Version Guard ───
+    // NEVER allow downloading older or same version
+    const currentVer = APP_VERSION;
+    const latestVer = info.version;
+    const isOlderOrSame = semverCompare(latestVer, currentVer) <= 0;
+    if (isOlderOrSame) {
+      updaterLog('WARN', 'Older or same version ignored. Current:', currentVer, 'Found:', latestVer);
+      updaterState.status = 'up-to-date';
+      updaterState.lastChecked = new Date().toISOString();
+      updaterState.latestVersion = currentVer;
+      sendUpdateStatus({ status: 'up-to-date', version: currentVer, message: 'Older or same version ignored' });
+      return;
+    }
+
     updaterState.status = 'available';
     updaterState.latestVersion = info.version;
     updaterState.updateInfo = info;
@@ -704,11 +719,29 @@ if (autoUpdater) {
 
   autoUpdater.on('error', (err) => {
     updaterLog('ERROR', 'Auto-updater error:', err.message);
+    updaterLog('ERROR', 'Error code:', err.code || 'No error code');
     updaterLog('ERROR', 'Error stack:', err.stack || 'No stack trace');
+    // Log the cause if available
+    if (err.cause) {
+      updaterLog('ERROR', 'Error cause:', String(err.cause));
+    }
     updaterState.status = 'error';
     updaterState.lastError = err.message;
     sendUpdateStatus({ status: 'error', message: err.message });
   });
+}
+
+// ─── Version Guard Utility ───
+function semverCompare(a, b) {
+  const pa = String(a).replace(/^v/, '').split('.').map(Number);
+  const pb = String(b).replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] || 0;
+    const nb = pb[i] || 0;
+    if (na > nb) return 1;
+    if (na < nb) return -1;
+  }
+  return 0;
 }
 
 // ─── Install update now ───
@@ -925,6 +958,7 @@ ipcMain.on('window-minimize', () => { if (mainWindow) mainWindow.minimize(); });
 ipcMain.on('window-maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
 ipcMain.on('window-close', () => { if (!mainWindow) return; if (trayCreated) mainWindow.hide(); else { isQuitting = true; mainWindow.close(); } });
 ipcMain.on('check-for-updates', () => checkForUpdates());
+ipcMain.handle('check-for-updates', async () => { checkForUpdates(); return { started: true }; });
 ipcMain.on('install-update', () => installUpdateNow());
 ipcMain.handle('get-app-version', () => APP_VERSION);
 ipcMain.handle('get-update-diagnostics', () => getUpdateDiagnostics());
