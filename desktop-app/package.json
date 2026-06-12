@@ -64,12 +64,6 @@
         "filter": ["**/*", "!**/node_modules/**", "!**/__pycache__/**", "!**/*.pyc"]
       },
       {
-        "from": "../.venv",
-        "to": ".venv",
-        "filter": ["**/*"],
-        "optional": true
-      },
-      {
         "from": "assets",
         "to": "assets"
       }
