@@ -26,3 +26,38 @@ Stage Summary:
 - Git remote cleaned (removed embedded PAT)
 - Push blocked: need valid GH_PAT to push to private repo
 - BLOCKED: User must provide new GH_PAT (previous one compromised) to proceed with push and GitHub Actions build
+---
+Task ID: 2.5.0-upgrade
+Agent: Main Agent
+Task: JARVIS Hybrid v2.5.0 Major Upgrade - Browser, Screen Analysis, Mouse/Keyboard Automation
+
+Work Log:
+- Analyzed user screenshots showing backend offline and settings page scroll issues
+- Fixed Settings page scrolling: changed parent section from overflow-hidden to overflow-y-auto, added pb-12 padding
+- Changed "Backend Offline" UI to "Direct API Mode" (yellow, less alarming instead of red)
+- Added auto-retry for crashed cloud backend process (10 second delay, up to retry)
+- Created BrowserPage.tsx - full in-app browser with webview, URL bar, screenshot, AI screen analysis
+- Added webviewTag: true to BrowserWindow webPreferences for embedded browser support
+- Added screen analysis capability using AI Vision (Groq/OpenAI/Gemini) - screenshot + analyze
+- Added mouse/keyboard automation: mouse-click, mouse-move, type-text, key-press, key-combo
+- Added job search automation: Upwork, Fiverr, Freelancer support
+- Enhanced system prompt with:
+  - Never reveal AI identity rule (7 rules)
+  - Professional capabilities list (8 capabilities)
+  - Professional behavior rules (7 rules)
+  - New action types (7 new actions)
+- Added Browser nav item in sidebar
+- Updated ChatPage to accept onOpenBrowser prop
+- Added local automation detection for screen analysis and job search
+- Added IPC bridge methods in preload.js for new features
+- Bumped version to 2.5.0
+- Built and verified Vite build successfully
+- Pushed to GitHub with PAT
+- Created v2.5.0 tag and pushed
+
+Stage Summary:
+- All code changes committed and pushed to GitHub
+- v2.5.0 tag created and pushed
+- GitHub Actions workflow should trigger and build the Windows installer
+- New features: Browser, Screen Analysis, Mouse/Keyboard, Job Search, Enhanced AI
+- Bug fixes: Settings scroll, Backend offline UI, Auto-retry backend
