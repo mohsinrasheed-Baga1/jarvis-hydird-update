@@ -549,9 +549,9 @@ export default function ChatPage({ backend }: ChatPageProps) {
 
       {!backend?.connected && (
         <div className="mx-auto mt-4 max-w-5xl w-full px-6">
-          <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-sm text-blue-200">
-            <div className="font-medium">Backend offline — using direct API mode</div>
-            <div className="mt-1 text-blue-100/80">Chat, voice, and automation still work via direct API calls. File analysis needs the backend.</div>
+          <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-200">
+            <div className="font-medium">Direct API Mode — Chat & voice working ✅</div>
+            <div className="mt-1 text-cyan-100/80">You're using direct API calls. Set API keys in Settings for full functionality.</div>
           </div>
         </div>
       )}

@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFolder: (path) => ipcRenderer.invoke('desktop-action', { type: 'open-folder', path }),
   openApp: (app) => ipcRenderer.invoke('desktop-action', { type: 'open-app', app }),
   showNotification: (title, body) => ipcRenderer.invoke('desktop-action', { type: 'notification', title, body }),
+  openInBrowser: (url) => ipcRenderer.invoke('desktop-action', { type: 'open-url', url }),
 
   // ─── Voice IPC — Direct STT & TTS through main process ───
   // These bypass the renderer's fetch() calls which can fail in Electron

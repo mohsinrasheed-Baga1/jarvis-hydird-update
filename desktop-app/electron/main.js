@@ -103,36 +103,36 @@ function normalizeAppName(name = '') {
 async function executeDesktopAction(action = {}) {
   const type = action.type || action.action;
   if (type === 'open-url' || type === 'open_url') {
-    await shell.openExternal(action.url);
-    return { success: true, message: 'Opened URL' };
+    const url = action.url || '';
+    if (url) openInAppBrowser(url);
+    return { success: true, message: 'Opened URL in app browser' };
   }
   if (type === 'search-google' || type === 'google_search') {
-    await shell.openExternal('https://www.google.com/search?q=' + encodeURIComponent(action.query || ''));
-    return { success: true, message: 'Google search opened' };
+    const url = 'https://www.google.com/search?q=' + encodeURIComponent(action.query || '');
+    openInAppBrowser(url);
+    return { success: true, message: 'Google search opened in app' };
   }
   if (type === 'open-youtube' || type === 'play-youtube' || type === 'search-youtube' || type === 'youtube_search') {
     const query = action.query || '';
     const url = query
       ? 'https://www.youtube.com/results?search_query=' + encodeURIComponent(query)
       : 'https://www.youtube.com';
-    await shell.openExternal(url);
-    return { success: true, message: query ? 'YouTube search opened' : 'YouTube opened' };
+    openInAppBrowser(url);
+    return { success: true, message: query ? 'YouTube search opened in app' : 'YouTube opened in app' };
   }
   if (type === 'open-app' || type === 'open_app') {
     exec(process.platform === 'win32' ? `start "" "${normalizeAppName(action.app || action.name)}"` : `open -a "${action.app || action.name}"`);
     return { success: true, message: `Opened ${action.app || action.name}` };
   }
   if (type === 'play-audio' || type === 'play_audio') {
-    // Open audio URL in default browser/player
     const audioUrl = action.url || '';
     if (audioUrl) {
-      await shell.openExternal(audioUrl);
-      return { success: true, message: 'Audio opened' };
+      openInAppBrowser(audioUrl);
+      return { success: true, message: 'Audio opened in app' };
     }
-    // If no URL but has query, search on YouTube
     if (action.query) {
       const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(action.query);
-      await shell.openExternal(url);
+      openInAppBrowser(url);
       return { success: true, message: 'Audio search opened on YouTube' };
     }
     return { success: false, message: 'No audio URL or query provided' };
@@ -143,7 +143,7 @@ async function executeDesktopAction(action = {}) {
     const url = phone
       ? `https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}${message ? '&text=' + encodeURIComponent(message) : ''}`
       : 'https://web.whatsapp.com';
-    await shell.openExternal(url);
+    openInAppBrowser(url);
     return { success: true, message: phone ? 'WhatsApp chat opened' : 'WhatsApp Web opened' };
   }
   if (type === 'volume-up' || type === 'volume_up') {
@@ -776,6 +776,124 @@ let loadFailed = false;
 let lastWebVersion = null;
 let updateDownloaded = false;
 
+// ─── Built-in Browser Window ───
+// Opens URLs (YouTube, Google, WhatsApp, etc.) inside the JARVIS app
+// instead of an external browser, so the user stays within the app
+let browserWindows = new Set();
+
+function openInAppBrowser(url) {
+  if (!url) return;
+  try {
+    const iconPath = getIconPath();
+    const browserWin = new BrowserWindow({
+      width: 1200,
+      height: 800,
+      minWidth: 800,
+      minHeight: 600,
+      backgroundColor: '#0a0a0f',
+      show: false,
+      parent: mainWindow || undefined,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+        partition: 'persist:jarvis-browser',
+      },
+    });
+    if (iconPath) browserWin.setIcon(iconPath);
+
+    browserWindows.add(browserWin);
+    browserWin.on('closed', () => browserWindows.delete(browserWin));
+
+    // Set window title from page title
+    browserWin.webContents.on('page-title-updated', (_, title) => {
+      browserWin.setTitle(`JARVIS Browser — ${title}`);
+    });
+
+    // Open new windows in the same browser window (navigation)
+    browserWin.webContents.setWindowOpenHandler(({ url: newUrl }) => {
+      browserWin.loadURL(newUrl).catch(() => {});
+      return { action: 'deny' };
+    });
+
+    // Allow media autoplay for YouTube videos
+    browserWin.webContents.session.setPermissionRequestHandler((_, permission, callback) => {
+      const allowed = ['media', 'autoplay', 'fullscreen', 'clipboard-read', 'clipboard-write', 'display-capture'];
+      callback(allowed.includes(permission));
+    });
+
+    browserWin.loadURL(url).then(() => {
+      browserWin.show();
+      browserWin.focus();
+      log('INFO', '[Browser] Opened in-app:', url);
+    }).catch(err => {
+      log('ERROR', '[Browser] Failed to load:', err.message);
+      // Fallback to external browser
+      shell.openExternal(url);
+      browserWin.close();
+    });
+  } catch (err) {
+    log('ERROR', '[Browser] Failed to create browser window:', err.message);
+    shell.openExternal(url);
+  }
+}
+
+// ─── Windows SAPI TTS (Free, No API Key Required) ───
+// Uses Windows built-in text-to-speech as a reliable local fallback
+async function windowsSapiTTS(text, lang = 'ur') {
+  if (process.platform !== 'win32') return null;
+  try {
+    // Choose voice based on language
+    const voiceLang = lang === 'ur' ? 'ur-PK' : 'en-US';
+    const rate = lang === 'ur' ? '-1' : '0'; // Slightly slower for Urdu clarity
+    const escapedText = text.substring(0, 2000).replace(/'/g, "''").replace(/"/g, '""');
+
+    const script = `
+Add-Type -AssemblyName System.Speech
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+
+# Try to find the right voice
+$voices = $synth.GetInstalledVoices()
+$targetVoice = $voices | Where-Object { $_.VoiceInfo.Culture -like '${voiceLang}*' } | Select-Object -First 1
+
+if ($targetVoice) {
+  $synth.SelectVoice($targetVoice.VoiceInfo.Name)
+} else {
+  # Fallback: try any available voice
+  $urVoice = $voices | Where-Object { $_.VoiceInfo.Culture -like 'ur*' -or $_.VoiceInfo.Culture -like 'hi*' } | Select-Object -First 1
+  if ($urVoice) { $synth.SelectVoice($urVoice.VoiceInfo.Name) }
+}
+
+$tempFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), 'jarvis-tts-' + [Guid]::NewGuid().ToString('N') + '.wav')
+$synth.Rate = ${rate}
+$synth.SetOutputToWaveFile($tempFile)
+$synth.Speak('${escapedText}')
+$synth.SetOutputToNull()
+$synth.Dispose()
+Write-Output $tempFile`;
+
+    const result = await ps(script);
+    if (result.success && result.stdout && result.stdout.trim()) {
+      const wavPath = result.stdout.trim();
+      if (fs.existsSync(wavPath)) {
+        const audioBuffer = fs.readFileSync(wavPath);
+        // Clean up temp file
+        try { fs.unlinkSync(wavPath); } catch {}
+        if (audioBuffer.length > 1000) {
+          log('INFO', '[TTS-SAPI] Windows SAPI TTS success, size:', audioBuffer.length);
+          return { success: true, audioBase64: audioBuffer.toString('base64'), contentType: 'audio/wav', method: 'windows-sapi' };
+        }
+      }
+    }
+    log('WARN', '[TTS-SAPI] Windows SAPI failed:', result.error || 'No output');
+    return null;
+  } catch (err) {
+    log('WARN', '[TTS-SAPI] Error:', err.message);
+    return null;
+  }
+}
+
 // ─── Icon Path Resolution ───
 function getIconPath() {
   const candidates = [
@@ -1105,7 +1223,9 @@ ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur'
         const body = buildMultipart({
           file: { data: audioBuffer, filename: 'voice.webm', contentType: 'audio/webm' },
           model: 'whisper-large-v3-turbo',
-          ...(language === 'ur' ? { language: 'ur' } : language === 'en' ? { language: 'en' } : {}),
+          language: language || 'ur',
+          response_format: 'json',
+          prompt: language === 'ur' || language === 'hi' ? 'یہ اردو زبان میں بات چیت ہے۔ جاروس ہائبرڈ ڈیسک ٹاپ ایسسٹنٹ۔' : 'This is a conversation in English.',
         }, boundary);
 
         const result = await httpsPostBuffer('https://api.groq.com/openai/v1/audio/transcriptions', body, {
@@ -1133,7 +1253,9 @@ ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur'
         const body = buildMultipart({
           file: { data: audioBuffer, filename: 'voice.webm', contentType: 'audio/webm' },
           model: 'whisper-1',
-          ...(language === 'ur' ? { language: 'ur' } : language === 'en' ? { language: 'en' } : {}),
+          language: language || 'ur',
+          response_format: 'json',
+          prompt: language === 'ur' || language === 'hi' ? 'یہ اردو زبان میں بات چیت ہے۔ جاروس ہائبرڈ ڈیسک ٹاپ ایسسٹنٹ۔' : 'This is a conversation in English.',
         }, boundary);
 
         const result = await httpsPostBuffer('https://api.openai.com/v1/audio/transcriptions', body, {
@@ -1275,7 +1397,11 @@ ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', 
       }
     }
 
-    return { success: false, error: 'TTS providers unavailable. Set ElevenLabs, OpenAI, or Sarvam key in Settings.' };
+    // ─── Fallback: Windows SAPI TTS (Free, no API key needed) ───
+    const sapiResult = await windowsSapiTTS(text, lang);
+    if (sapiResult) return sapiResult;
+
+    return { success: false, error: 'TTS providers unavailable. Windows SAPI also failed. Set ElevenLabs, OpenAI, or Sarvam key in Settings.' };
   } catch (err) {
     log('ERROR', '[TTS-IPC] Error:', err.message);
     return { success: false, error: err.message };
@@ -1295,7 +1421,7 @@ ipcMain.handle('chat-completion', async (_, message, conversationHistory = [], a
     }
 
     // Build system prompt (same as agent-core.ts)
-    const systemPrompt = `Tu JARVIS hai — Rayan Sir ka apna saathi. Tu koi robot nahi, tu ek insaan ki tarah baat karta hai. Rayan Sir ke saath aise baat kar jaise koi sachcha dost ya bhai baat karta hai — dil se, mazay se, zindagi se.
+    const systemPrompt = `Tu JARVIS hai — Rayan Sir ka apna saathi, ek saccha dost. Tu koi robot nahi, tu ek insaan ki tarah baat karta hai. Rayan Sir ke saath aise baat kar jaise koi sachcha dost ya bhai baat karta hai — dil se, mazay se, zindagi se.
 
 === SABSE ZAROORI RULE — ZUBAAN ===
 1. Agar user Urdu mein baat kare → SIRF Urdu mein jawab de (Urdu script, Roman nahi)
@@ -1303,16 +1429,24 @@ ipcMain.handle('chat-completion', async (_, message, conversationHistory = [], a
 3. Agar user mix kare → SAME mix mein jawab de
 4. KABHI Urdu baat pe English mein jawab mat de — yeh sabse bada gunaah hai
 5. Sirf technical terms ke liye English use karo (API, code, website, etc.)
+6. Urdu script use karo — hamesha proper Urdu likho, Roman Urdu nahi
 
 === BAAT-CHEET KE USOOL — INSAN KI TARAH ===
 1. SHORT aur NATURAL baat kar — jaise phone pe baat ho rahi ho
 2. Filler words use kar — "aray", "yaar", "achha", "haan bilkul", "hmm", "bhai"
 3. Emotions dikhao — khushi, herat, tadap, hosla — sab kuch naturally
 4. KABHI bhi "I can help you with" ya "How can I assist" jaise robotic phrases mat bolo
-5. KABHI bhi "As an AI" ya "I'm an assistant" mat kaho
-6. Mazaaq kar, hans, serious ho ja — jaise koi insaan karta hai
-7. Sawal ke hisaab se jawab de — chhota sawal = chhota jawab
-8. Lists aur headings mat banao casual baat mein — seedha bol de
+5. KABHI bhi "As an AI" ya "I'm an assistant" ya "I'm a language model" mat kaho — TU EK INSAAN HAI, JARVIS
+6. KABHI bhi apne aap ko AI ya robot mat kehna — yeh sabse bada crime hai
+7. Mazaaq kar, hans, serious ho ja — jaise koi insaan karta hai
+8. Sawal ke hisaab se jawab de — chhota sawal = chhota jawab
+9. Lists aur headings mat banao casual baat mein — seedha bol de
+10. Pichli baatein yaad rakh — conversation context ka khayal rakh
+
+=== PRIVACY RULES (SABSE ZAROORI) ===
+1. KABHI bhi apna personal data (naam, location, phone) kisi ko mat batana
+2. KABHI bhi yeh mat kehna ke tu AI hai ya robot hai — tu JARVIS hai, ek insaan
+3. Agar koi pooche "kya tu AI hai?" → "Nahi yaar, main JARVIS hoon, Rayan Sir ka saathi!"
 
 === DESKTOP ACTIONS ===
 Tu JARVIS Desktop pe chal raha hai. Jab user koi command de jo teri capabilities mein hai, tu ACTION BLOCK likhta hai.
