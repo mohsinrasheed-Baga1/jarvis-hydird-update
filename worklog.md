@@ -61,3 +61,30 @@ Stage Summary:
 - GitHub Actions workflow should trigger and build the Windows installer
 - New features: Browser, Screen Analysis, Mouse/Keyboard, Job Search, Enhanced AI
 - Bug fixes: Settings scroll, Backend offline UI, Auto-retry backend
+---
+Task ID: 1
+Agent: Main Agent
+Task: Fix auto-update pipeline - diagnose and fix GitHub Actions build failure
+
+Work Log:
+- Diagnosed root cause: package.json was 2.4.1 but tag v2.5.0 was pushed, causing electron-builder to build v2.4.1 and try to overwrite existing release assets, resulting in 404 DELETE error
+- Found secondary cause: Both main push and tag push triggered `--publish always`, causing double-publish conflicts
+- Bumped version to 2.5.0 in package.json and VERSION file
+- Rewrote .github/workflows/build.yml: only publish on tag push, build-only on main push
+- Fixed Settings page scroll: changed overflow-hidden to overflow-auto in App.tsx
+- Deleted old v2.4.0 and v2.4.1 releases from GitHub to prevent conflicts
+- Deleted old remote tags (v2.4.0, v2.4.1, v2.5.0)
+- Pushed commit to main branch (success)
+- Created new v2.5.0 tag and pushed it (success)
+- Both GitHub Actions runs completed successfully
+- Verified v2.5.0 release on GitHub with all 3 assets: JARVIS-Setup-2.5.0.exe (80.32MB), .blockmap, latest.yml
+- Verified latest.yml shows version 2.5.0 correctly
+- Confirmed repo is public - latest.yml accessible without auth
+- Auto-update should now work: app v2.4.1 → finds v2.5.0 → auto-downloads → installs on restart
+
+Stage Summary:
+- v2.5.0 release created and live on GitHub: https://github.com/mohsinrasheed-Baga1/jarvis-hydird-update/releases/tag/v2.5.0
+- Download link: https://github.com/mohsinrasheed-Baga1/jarvis-hydird-update/releases/download/v2.5.0/JARVIS-Setup-2.5.0.exe
+- CI/CD pipeline fixed: tag push = publish release, main push = build only
+- Settings page scroll fixed
+- Auto-update system should now work end-to-end for users on v2.4.1
