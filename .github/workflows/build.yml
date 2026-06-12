@@ -1,0 +1,67 @@
+name: Build & Release JARVIS Hybrid
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: desktop-app/package-lock.json
+
+      - name: Install desktop-app dependencies
+        working-directory: desktop-app
+        run: npm ci
+
+      - name: Build frontend (Vite)
+        working-directory: desktop-app
+        run: npx vite build
+
+      - name: Package & Publish (electron-builder)
+        working-directory: desktop-app
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: npx electron-builder --win --x64 --publish always
+
+      - name: Verify release assets
+        shell: pwsh
+        run: |
+          Write-Host "=== Checking release assets ==="
+          $releaseDir = "desktop-app/release"
+          if (Test-Path $releaseDir) {
+            Get-ChildItem -Path $releaseDir -Recurse -File | ForEach-Object {
+              Write-Host "  Asset: $($_.FullName) (Size: $([math]::Round($_.Length / 1MB, 2)) MB)"
+            }
+          } else {
+            Write-Host "WARNING: release directory not found"
+          }
+
+          # Verify critical files
+          $ymlFiles = Get-ChildItem -Path $releaseDir -Recurse -Filter "latest.yml" -ErrorAction SilentlyContinue
+          $exeFiles = Get-ChildItem -Path $releaseDir -Recurse -Filter "JARVIS-Setup-*.exe" -ErrorAction SilentlyContinue
+          $blockmapFiles = Get-ChildItem -Path $releaseDir -Recurse -Filter "*.blockmap" -ErrorAction SilentlyContinue
+
+          if ($ymlFiles.Count -eq 0) { Write-Error "MISSING: latest.yml not found in release assets"; exit 1 }
+          if ($exeFiles.Count -eq 0) { Write-Error "MISSING: Setup EXE not found in release assets"; exit 1 }
+          if ($blockmapFiles.Count -eq 0) { Write-Error "MISSING: .blockmap not found in release assets"; exit 1 }
+
+          Write-Host "=== All critical release assets verified ==="
+          Write-Host "  latest.yml: $($ymlFiles[0].Name)"
+          Write-Host "  Setup EXE: $($exeFiles[0].Name)"
+          Write-Host "  Blockmap: $($blockmapFiles[0].Name)"
