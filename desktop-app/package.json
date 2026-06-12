@@ -66,7 +66,8 @@
       {
         "from": "../.venv",
         "to": ".venv",
-        "filter": ["**/*"]
+        "filter": ["**/*"],
+        "optional": true
       },
       {
         "from": "assets",
@@ -74,7 +75,7 @@
       }
     ],
     "win": {
-      "icon": "assets/icon.png",
+      "icon": "assets/icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -86,9 +87,9 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "installerIcon": "assets/icon.png",
-      "uninstallerIcon": "assets/icon.png",
-      "installerHeaderIcon": "assets/icon.png",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "JARVIS Hybrid",
@@ -96,9 +97,8 @@
       "allowElevation": true,
       "deleteAppDataOnUninstall": false,
       "runAfterFinish": true,
-      "installerLanguages": ["en_US", "ur_PK"],
-      "language": "1033",
-      "include": "build/installer.nsh"
+      "installerLanguages": ["en_US"],
+      "language": "1033"
     },
 
     "linux": {
