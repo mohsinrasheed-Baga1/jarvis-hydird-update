@@ -12,7 +12,6 @@
     "dev:electron": "wait-on http://localhost:5173 && electron .",
     "build": "vite build && electron-builder",
     "build:win": "vite build && electron-builder --win --x64",
-    "build:win-portable": "vite build && electron-builder --win portable --x64",
     "build:win-publish": "vite build && electron-builder --win --x64 --publish always",
     "build:all": "npm run build:win",
     "preview": "vite preview",
@@ -80,13 +79,9 @@
         {
           "target": "nsis",
           "arch": ["x64"]
-        },
-        {
-          "target": "portable",
-          "arch": ["x64"]
         }
       ],
-      "artifactName": "JARVIS-Hybrid-Setup-${version}.${ext}"
+      "artifactName": "JARVIS-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -105,9 +100,7 @@
       "language": "1033",
       "include": "build/installer.nsh"
     },
-    "portable": {
-      "artifactName": "JARVIS-Hybrid-Portable-${version}.exe"
-    },
+
     "linux": {
       "icon": "assets/icon.png",
       "target": ["AppImage", "deb"]
