@@ -39,6 +39,21 @@ export default function SettingsPage() {
   const [piperBinaryDownloading, setPiperBinaryDownloading] = useState(false);
   const [testTTSStatus, setTestTTSStatus] = useState('');
 
+  // Multiple API Keys state
+  const [multiKeys, setMultiKeys] = useState<Record<string, string[]>>({});
+  const [newKeyInput, setNewKeyInput] = useState('');
+  const [selectedKeyProvider, setSelectedKeyProvider] = useState<string>('groq');
+
+  useEffect(() => {
+    // Load multi keys from IPC
+    const electronAPI = (window as any).electronAPI;
+    if (electronAPI?.getMultiKeys) {
+      electronAPI.getMultiKeys().then((result: any) => {
+        if (result.success) setMultiKeys(result.keys);
+      }).catch(() => {});
+    }
+  }, []);
+
   useEffect(() => {
     setApiKeys(storageService.getApiKeys());
     setActiveProvider(storageService.getActiveProvider());
@@ -254,7 +269,7 @@ export default function SettingsPage() {
           <div className="grid grid-cols-2 gap-4">
             <div className="bg-slate-800 rounded-lg p-4">
               <p className="text-xs text-slate-500 mb-1">Current Version</p>
-              <p className="text-xl font-bold text-white">v3.0.3</p>
+              <p className="text-xl font-bold text-white">v3.0.5</p>
             </div>
             <div className="bg-slate-800 rounded-lg p-4">
               <p className="text-xs text-slate-500 mb-1">Latest Version</p>
@@ -375,6 +390,95 @@ export default function SettingsPage() {
           </div>
         </section>
 
+        {/* ─── Multiple API Keys Manager ─── */}
+        <section className="bg-slate-900 border border-slate-700 rounded-lg p-6 space-y-5">
+          <div className="flex items-center gap-3">
+            <svg className="w-5 h-5 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
+            </svg>
+            <div>
+              <h2 className="text-lg font-semibold text-white">Multiple API Keys</h2>
+              <p className="text-xs text-slate-500">Add multiple keys per provider — auto-rotates on rate limits</p>
+            </div>
+          </div>
+
+          <div className="flex gap-2">
+            <select
+              value={selectedKeyProvider}
+              onChange={(e) => setSelectedKeyProvider(e.target.value)}
+              className="bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-cyan-500"
+            >
+              {['groq', 'gemini', 'openai', 'elevenlabs', 'sarvam'].map(p => (
+                <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
+              ))}
+            </select>
+            <input
+              type="text"
+              value={newKeyInput}
+              onChange={(e) => setNewKeyInput(e.target.value)}
+              placeholder="Enter API key to add..."
+              className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+            />
+            <button
+              onClick={async () => {
+                if (!newKeyInput.trim()) return;
+                const electronAPI = (window as any).electronAPI;
+                if (electronAPI?.addApiKey) {
+                  const result = await electronAPI.addApiKey(selectedKeyProvider, newKeyInput.trim());
+                  if (result.success) {
+                    setMultiKeys(result.keys);
+                    setNewKeyInput('');
+                  }
+                }
+              }}
+              className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg font-medium text-sm"
+            >
+              Add
+            </button>
+          </div>
+
+          <div className="space-y-3">
+            {['groq', 'gemini', 'openai', 'elevenlabs', 'sarvam'].map(provider => {
+              const keys = multiKeys[provider] || [];
+              if (keys.length === 0) return null;
+              return (
+                <div key={provider} className="bg-slate-800 rounded-lg p-3">
+                  <h3 className="text-sm font-medium text-slate-300 mb-2">
+                    {provider.charAt(0).toUpperCase() + provider.slice(1)} 
+                    <span className="text-slate-500 ml-2">({keys.length} key{keys.length > 1 ? 's' : ''})</span>
+                  </h3>
+                  <div className="space-y-1">
+                    {keys.map((key, idx) => (
+                      <div key={idx} className="flex items-center gap-2 text-xs">
+                        <span className="text-slate-400">{idx + 1}.</span>
+                        <code className="text-cyan-300 flex-1 truncate">{key.substring(0, 8)}...{key.substring(key.length - 4)}</code>
+                        <button
+                          onClick={async () => {
+                            const electronAPI = (window as any).electronAPI;
+                            if (electronAPI?.removeApiKey) {
+                              const result = await electronAPI.removeApiKey(provider, idx);
+                              if (result.success) setMultiKeys(result.keys);
+                            }
+                          }}
+                          className="text-red-400 hover:text-red-300 shrink-0"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {Object.keys(multiKeys).every(k => !(multiKeys[k] || []).length) && (
+            <p className="text-sm text-slate-500 text-center py-4">
+              No additional keys added yet. Add multiple keys per provider for auto-rotation.
+            </p>
+          )}
+        </section>
+
         {/* ─── Voice Settings Section ─── */}
         <section className="bg-slate-900 border border-slate-700 rounded-lg p-6 space-y-5">
           <div className="flex items-center gap-3">
@@ -385,7 +489,7 @@ export default function SettingsPage() {
           </div>
 
           <p className="text-sm text-slate-400">
-            TTS priority: ElevenLabs → Edge TTS (free) → OpenAI → Sarvam → Piper (offline). 
+            TTS priority: Edge TTS (free, best) → ElevenLabs → OpenAI → Sarvam → Piper (offline). 
             STT uses Groq Whisper (fastest) then OpenAI Whisper (better quality).
           </p>
 

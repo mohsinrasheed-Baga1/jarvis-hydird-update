@@ -31,7 +31,7 @@ try {
 const CLOUD_APP_URL = 'http://127.0.0.1:3000';
 const VITE_DEV_URL = 'http://127.0.0.1:5173';
 const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
-const APP_VERSION = '3.0.4';
+const APP_VERSION = '3.0.5';
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
 const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
 const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
@@ -883,6 +883,9 @@ ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur'
 
     // Map language codes to Whisper-compatible codes
     const whisperLang = language === 'ur' ? 'ur' : language === 'en' ? 'en' : language || 'ur';
+    
+    // Urdu prompt for better recognition accuracy
+    const urduPrompt = 'اسلام علیکم، میں اردو بول رہا ہوں۔';
 
     // Try Groq Whisper first (fastest, cheapest, best for Urdu)
     if (groqKey) {
@@ -890,9 +893,10 @@ ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur'
         const boundary = '----JarvisSTT' + Date.now();
         const body = buildMultipart({
           file: { data: audioBuffer, filename, contentType },
-          model: 'whisper-large-v3-turbo',
+          model: 'whisper-large-v3',
           language: whisperLang,
           response_format: 'json',
+          prompt: whisperLang === 'ur' ? urduPrompt : '',
         }, boundary);
 
         const result = await httpsPostBuffer('https://api.groq.com/openai/v1/audio/transcriptions', body, {
@@ -1062,28 +1066,70 @@ const EDGE_TTS_VOICES = {
 
 async function generateEdgeTTS(text, lang) {
   try {
-    // Try Python edge-tts command
     const voice = EDGE_TTS_VOICES[lang] || EDGE_TTS_VOICES.ur;
     const outputFile = path.join(app.getPath('temp'), `edge-tts-${Date.now()}.mp3`);
 
-    // First check if edge-tts is installed
-    const checkResult = await runCommand('python', ['-c', 'import edge_tts; print("ok")'], { timeout: 5000 });
-    if (!checkResult.success || !checkResult.stdout.includes('ok')) {
-      // Try pip install edge-tts
-      log('INFO', '[EdgeTTS] Installing edge-tts...');
-      const installResult = await runCommand('pip', ['install', 'edge-tts', '-q'], { timeout: 60000 });
-      if (!installResult.success) {
-        log('WARN', '[EdgeTTS] Failed to install edge-tts:', installResult.error);
-        return { success: false, error: 'edge-tts Python package install failed' };
+    // Try multiple Python commands to find one that works
+    const pythonCommands = ['python', 'python3', 'py'];
+    let workingPython = null;
+    let edgeTTSInstalled = false;
+
+    for (const cmd of pythonCommands) {
+      const checkResult = await runCommand(cmd, ['-c', 'import edge_tts; print("ok")'], { timeout: 5000 });
+      if (checkResult.success && checkResult.stdout.includes('ok')) {
+        workingPython = cmd;
+        edgeTTSInstalled = true;
+        break;
       }
     }
 
-    const result = await runCommand('edge-tts', [
+    // If edge-tts not installed, try installing it
+    if (!edgeTTSInstalled) {
+      log('INFO', '[EdgeTTS] Installing edge-tts...');
+      for (const cmd of pythonCommands) {
+        // First check if this python exists
+        const existsCheck = await runCommand(cmd, ['--version'], { timeout: 5000 });
+        if (!existsCheck.success) continue;
+
+        const installResult = await runCommand(cmd, ['-m', 'pip', 'install', 'edge-tts', '-q', '--user'], { timeout: 120000 });
+        if (installResult.success) {
+          workingPython = cmd;
+          edgeTTSInstalled = true;
+          break;
+        }
+        // Also try without -m pip
+        const installResult2 = await runCommand('pip', ['install', 'edge-tts', '-q', '--user'], { timeout: 120000 });
+        if (installResult2.success) {
+          workingPython = 'python';
+          edgeTTSInstalled = true;
+          break;
+        }
+      }
+      if (!edgeTTSInstalled) {
+        log('WARN', '[EdgeTTS] Failed to install edge-tts via any Python command');
+        return { success: false, error: 'edge-tts Python package install failed. Install manually: pip install edge-tts' };
+      }
+    }
+
+    // Run edge-tts command
+    // Try using the edge-tts CLI directly first
+    let result = await runCommand('edge-tts', [
       '--voice', voice,
       '--text', text.substring(0, 5000),
       '--write-media', outputFile,
       '--rate', '+0%',
     ], { timeout: 30000 });
+
+    // If edge-tts CLI not found, try running via Python module
+    if (!result.success && workingPython) {
+      result = await runCommand(workingPython, [
+        '-m', 'edge_tts',
+        '--voice', voice,
+        '--text', text.substring(0, 5000),
+        '--write-media', outputFile,
+        '--rate', '+0%',
+      ], { timeout: 30000 });
+    }
 
     if (fs.existsSync(outputFile)) {
       const audioBuffer = fs.readFileSync(outputFile);
@@ -1330,22 +1376,34 @@ ipcMain.handle('download-piper-model', async (_, lang) => {
     const urls = modelUrls[lang];
     if (!urls) return { success: false, error: 'Unsupported language: ' + lang };
 
-    // Download model file
+    // Download model file with progress
     log('INFO', '[Piper] Downloading', lang, 'model...');
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('piper-download-progress', { lang, status: 'downloading-model', percent: 0 });
-    }
-
-    const modelResult = await downloadFile(urls.model, path.join(PIPER_MODELS_DIR, urls.modelFile));
+    const modelResult = await downloadFile(urls.model, path.join(PIPER_MODELS_DIR, urls.modelFile), (pct, downloaded, total) => {
+      // Model file is ~80% of total download, config is ~20%
+      const overallPct = Math.round(pct * 0.8);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('piper-download-progress', {
+          lang, status: 'downloading-model', percent: overallPct,
+          detail: `${(downloaded / 1048576).toFixed(1)}MB / ${(total / 1048576).toFixed(1)}MB`
+        });
+      }
+    });
     if (!modelResult.success) return { success: false, error: 'Model download failed: ' + modelResult.error };
+    log('INFO', '[Piper] Model downloaded, size:', modelResult.size || 'unknown');
 
-    // Download config file
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('piper-download-progress', { lang, status: 'downloading-config', percent: 80 });
-    }
-
-    const configResult = await downloadFile(urls.config, path.join(PIPER_MODELS_DIR, urls.configFile));
+    // Download config file with progress
+    log('INFO', '[Piper] Downloading', lang, 'config...');
+    const configResult = await downloadFile(urls.config, path.join(PIPER_MODELS_DIR, urls.configFile), (pct, downloaded, total) => {
+      const overallPct = 80 + Math.round(pct * 0.2);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('piper-download-progress', {
+          lang, status: 'downloading-config', percent: overallPct,
+          detail: `Config: ${(downloaded / 1024).toFixed(0)}KB / ${(total / 1024).toFixed(0)}KB`
+        });
+      }
+    });
     if (!configResult.success) return { success: false, error: 'Config download failed: ' + configResult.error };
+    log('INFO', '[Piper] Config downloaded, size:', configResult.size || 'unknown');
 
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('piper-download-progress', { lang, status: 'complete', percent: 100 });
@@ -1627,6 +1685,15 @@ async function generateTTSInternal(text, lang = 'ur', emotion = 'normal', apiKey
 
   log('INFO', '[TTS] Generating, lang:', lang, 'emotion:', emotion, 'text length:', text.length);
 
+  // ─── Try Edge TTS FIRST (free, reliable, excellent Urdu) ───
+  // This is the most reliable option - no API key needed, works offline with Python
+  const edgeResult = await generateEdgeTTS(text, lang);
+  if (edgeResult.success) {
+    log('INFO', '[TTS] Edge-TTS succeeded');
+    return edgeResult;
+  }
+  log('INFO', '[TTS] Edge-TTS failed:', edgeResult.error || 'unknown', '— trying ElevenLabs...');
+
   // ─── Try ElevenLabs ───
   if (elevenlabsKey) {
     try {
@@ -1687,10 +1754,6 @@ async function generateTTSInternal(text, lang = 'ur', emotion = 'normal', apiKey
     } catch (err) { log('WARN', '[TTS] ElevenLabs error:', err.message); }
   }
 
-  // ─── Try Edge TTS (free) ───
-  const edgeResult = await generateEdgeTTS(text, lang);
-  if (edgeResult.success) return edgeResult;
-
   // ─── Try OpenAI TTS ───
   if (openaiKey) {
     try {
@@ -1734,15 +1797,19 @@ async function generateTTSInternal(text, lang = 'ur', emotion = 'normal', apiKey
   return { success: false, error: 'تمام آواز پرووائڈرز ناکام۔ Settings میں ElevenLabs یا OpenAI Key ڈالیں، یا Edge TTS انسٹال کریں۔' };
 }
 
-function downloadFile(urlStr, destPath) {
+function downloadFile(urlStr, destPath, onProgress) {
   return new Promise((resolve) => {
-    try {
-      const parsedUrl = new URL(urlStr);
-      const mod = parsedUrl.protocol === 'http:' ? require('http') : require('https');
+    let resolved = false;
+    const doResolve = (result) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(result);
+    };
 
+    try {
       const followRedirect = (url, redirectCount = 0) => {
-        if (redirectCount > 5) {
-          resolve({ success: false, error: 'Too many redirects' });
+        if (redirectCount > 10) {
+          doResolve({ success: false, error: 'Too many redirects' });
           return;
         }
         const pu = new URL(url);
@@ -1752,36 +1819,114 @@ function downloadFile(urlStr, destPath) {
           port: pu.port || (pu.protocol === 'http:' ? 80 : 443),
           path: pu.pathname + pu.search,
           method: 'GET',
-          headers: { 'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.3' },
+          headers: {
+            'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.5',
+            'Accept': '*/*',
+            'Accept-Encoding': 'identity',
+          },
         };
         const req = m.request(opts, (res) => {
+          // Handle redirects (HuggingFace CDN uses multiple redirects)
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            followRedirect(res.headers.location, redirectCount + 1);
+            let location = res.headers.location;
+            // Handle relative URLs
+            if (location.startsWith('/')) {
+              location = `${pu.protocol}//${pu.hostname}${location}`;
+            }
+            res.resume(); // Drain the response
+            followRedirect(location, redirectCount + 1);
             return;
           }
           if (res.statusCode !== 200) {
-            resolve({ success: false, error: `HTTP ${res.statusCode}` });
+            res.resume();
+            doResolve({ success: false, error: `HTTP ${res.statusCode} for ${url.substring(0, 80)}` });
             return;
           }
-          const file = fs.createWriteStream(destPath);
-          res.pipe(file);
-          file.on('finish', () => {
-            file.close();
-            resolve({ success: true });
+
+          const totalSize = parseInt(res.headers['content-length'] || '0', 10);
+          let downloadedSize = 0;
+          let lastProgressReport = 0;
+
+          // Write to temp file first, then rename (atomic write)
+          const tempPath = destPath + '.downloading';
+          const file = fs.createWriteStream(tempPath);
+
+          // Response timeout: if no data for 60s, abort
+          let responseTimeout = setTimeout(() => {
+            req.destroy(new Error('Response timeout - no data for 60s'));
+          }, 60000);
+
+          res.on('data', (chunk) => {
+            downloadedSize += chunk.length;
+            // Reset response timeout on each data event
+            clearTimeout(responseTimeout);
+            responseTimeout = setTimeout(() => {
+              req.destroy(new Error('Response timeout - no data for 60s'));
+            }, 60000);
+
+            // Report progress
+            if (onProgress && totalSize > 0) {
+              const pct = Math.round((downloadedSize / totalSize) * 100);
+              if (pct - lastProgressReport >= 5 || pct === 100) {
+                lastProgressReport = pct;
+                onProgress(pct, downloadedSize, totalSize);
+              }
+            }
           });
+
+          res.pipe(file);
+
+          file.on('finish', () => {
+            clearTimeout(responseTimeout);
+            file.close((err) => {
+              if (err) {
+                try { fs.unlinkSync(tempPath); } catch {}
+                doResolve({ success: false, error: `File close error: ${err.message}` });
+                return;
+              }
+              // Atomic rename: temp → final destination
+              try {
+                if (fs.existsSync(destPath)) fs.unlinkSync(destPath);
+                fs.renameSync(tempPath, destPath);
+                doResolve({ success: true, size: downloadedSize });
+              } catch (renameErr) {
+                // Rename failed, try copy
+                try {
+                  fs.copyFileSync(tempPath, destPath);
+                  fs.unlinkSync(tempPath);
+                  doResolve({ success: true, size: downloadedSize });
+                } catch {
+                  doResolve({ success: false, error: `Rename/copy error: ${renameErr.message}` });
+                }
+              }
+            });
+          });
+
           file.on('error', (err) => {
-            try { fs.unlinkSync(destPath); } catch {}
-            resolve({ success: false, error: err.message });
+            clearTimeout(responseTimeout);
+            try { fs.unlinkSync(tempPath); } catch {}
+            doResolve({ success: false, error: `Write error: ${err.message}` });
+          });
+
+          res.on('error', (err) => {
+            clearTimeout(responseTimeout);
+            try { fs.unlinkSync(tempPath); } catch {}
+            doResolve({ success: false, error: `Response error: ${err.message}` });
           });
         });
-        req.on('error', (err) => resolve({ success: false, error: err.message }));
-        req.setTimeout(300000, () => { req.destroy(new Error('Download timeout')); resolve({ success: false, error: 'Download timeout' }); });
+
+        req.on('error', (err) => doResolve({ success: false, error: `Request error: ${err.message}` }));
+        // Overall timeout: 5 minutes for the full download
+        req.setTimeout(300000, () => {
+          req.destroy(new Error('Download timeout (5 min)'));
+          doResolve({ success: false, error: 'Download timeout (5 min)' });
+        });
         req.end();
       };
 
       followRedirect(urlStr);
     } catch (err) {
-      resolve({ success: false, error: err.message });
+      doResolve({ success: false, error: err.message });
     }
   });
 }
@@ -1925,6 +2070,363 @@ EXAMPLES:
   } catch (err) {
     log('ERROR', '[Chat-IPC] Error:', err.message);
     return { success: false, message: 'چیٹ میں مسئلہ آ گیا۔', emotion: 'sympathetic', error: err.message };
+  }
+});
+
+// ─── IPC: Terminal - Execute command with streaming output ───
+ipcMain.handle('terminal-execute', async (_, command, cwd) => {
+  try {
+    if (!command || !command.trim()) return { success: false, error: 'Empty command' };
+    
+    // Security: Block dangerous commands
+    const blocked = ['format', 'del /f', 'rm -rf /', 'rmdir /s', 'shutdown', 'taskkill /f'];
+    const lowerCmd = command.toLowerCase().trim();
+    for (const b of blocked) {
+      if (lowerCmd.includes(b)) return { success: false, error: `Command blocked for safety: ${b}` };
+    }
+
+    const shellCmd = process.platform === 'win32' ? 'cmd.exe' : '/bin/bash';
+    const shellArgs = process.platform === 'win32' ? ['/c', command] : ['-c', command];
+    const options = { timeout: 30000, windowsHide: true };
+    if (cwd) options.cwd = cwd;
+
+    const result = await runCommand(shellCmd, shellArgs, options);
+    return {
+      success: result.success,
+      stdout: result.stdout || '',
+      stderr: result.stderr || '',
+      exitCode: result.code,
+      error: result.error || '',
+    };
+  } catch (err) {
+    return { success: false, error: err.message, stdout: '', stderr: '' };
+  }
+});
+
+// IPC: Terminal - Spawn persistent shell session
+const terminalSessions = new Map();
+let sessionCounter = 0;
+
+ipcMain.handle('terminal-create-session', async () => {
+  const sessionId = `term_${++sessionCounter}_${Date.now()}`;
+  const shellCmd = process.platform === 'win32' ? 'cmd.exe' : '/bin/bash';
+  const child = spawn(shellCmd, [], { shell: false, windowsHide: true });
+  
+  terminalSessions.set(sessionId, { child, output: '' });
+  
+  child.stdout?.on('data', (data) => {
+    const str = data.toString();
+    const session = terminalSessions.get(sessionId);
+    if (session) session.output += str;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('terminal-output', { sessionId, data: str, stream: 'stdout' });
+    }
+  });
+  
+  child.stderr?.on('data', (data) => {
+    const str = data.toString();
+    const session = terminalSessions.get(sessionId);
+    if (session) session.output += str;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('terminal-output', { sessionId, data: str, stream: 'stderr' });
+    }
+  });
+  
+  child.on('close', (code) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('terminal-output', { sessionId, data: `\n[Process exited with code ${code}]\n`, stream: 'exit' });
+    }
+    terminalSessions.delete(sessionId);
+  });
+
+  return { success: true, sessionId };
+});
+
+ipcMain.handle('terminal-write', async (_, sessionId, input) => {
+  const session = terminalSessions.get(sessionId);
+  if (!session) return { success: false, error: 'Session not found' };
+  try {
+    session.child.stdin?.write(input + '\n');
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('terminal-kill', async (_, sessionId) => {
+  const session = terminalSessions.get(sessionId);
+  if (!session) return { success: false, error: 'Session not found' };
+  try {
+    session.child.kill();
+    terminalSessions.delete(sessionId);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ─── IPC: Mouse & Keyboard Control ───
+ipcMain.handle('mouse-move', async (_, x, y) => {
+  if (process.platform !== 'win32') return { success: false, error: 'Mouse control only supported on Windows' };
+  try {
+    const result = await ps(`
+      Add-Type -AssemblyName System.Windows.Forms
+      [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${Math.round(x)},${Math.round(y)})
+    `);
+    return { success: true };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('mouse-click', async (_, x, y, button = 'left', clicks = 1) => {
+  if (process.platform !== 'win32') return { success: false, error: 'Mouse control only supported on Windows' };
+  try {
+    const clickType = button === 'right' ? 'Right' : 'Left';
+    const downEvent = button === 'right' ? 8 : 2; // MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN
+    const upEvent = button === 'right' ? 16 : 4;   // MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP
+    const result = await ps(`
+      Add-Type -AssemblyName System.Windows.Forms
+      Add-Type @"
+      using System;
+      using System.Runtime.InteropServices;
+      public class Mouse {
+        [DllImport("user32.dll")] public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
+        [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+      }
+"@
+      [Mouse]::SetCursorPos(${Math.round(x)},${Math.round(y)})
+      Start-Sleep -Milliseconds 50
+      ${Array(clicks).fill(`[Mouse]::mouse_event(${downEvent}, 0, 0, 0, 0); Start-Sleep -Milliseconds 50; [Mouse]::mouse_event(${upEvent}, 0, 0, 0, 0)`).join('; Start-Sleep -Milliseconds 100;')}
+    `);
+    return { success: result.success || true };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('keyboard-type', async (_, text) => {
+  if (process.platform !== 'win32') return { success: false, error: 'Keyboard control only supported on Windows' };
+  try {
+    const escaped = text.replace(/'/g, "''").replace(/"/g, '`"');
+    const result = await ps(`
+      Add-Type -AssemblyName System.Windows.Forms
+      [System.Windows.Forms.SendKeys]::SendWait('${escaped}')
+    `);
+    return { success: true };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('keyboard-press', async (_, key) => {
+  if (process.platform !== 'win32') return { success: false, error: 'Keyboard control only supported on Windows' };
+  try {
+    const keyMap = {
+      'enter': '{ENTER}', 'tab': '{TAB}', 'escape': '{ESC}', 'backspace': '{BS}',
+      'delete': '{DELETE}', 'space': ' ', 'up': '{UP}', 'down': '{DOWN}',
+      'left': '{LEFT}', 'right': '{RIGHT}', 'home': '{HOME}', 'end': '{END}',
+      'f1': '{F1}', 'f2': '{F2}', 'f3': '{F3}', 'f4': '{F4}',
+      'f5': '{F5}', 'f6': '{F6}', 'f7': '{F7}', 'f8': '{F8}',
+      'f9': '{F9}', 'f10': '{F10}', 'f11': '{F11}', 'f12': '{F12}',
+    };
+    const sendKey = keyMap[key.toLowerCase()] || key;
+    const result = await ps(`
+      Add-Type -AssemblyName System.Windows.Forms
+      [System.Windows.Forms.SendKeys]::SendWait('${sendKey}')
+    `);
+    return { success: true };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('keyboard-hotkey', async (_, keys) => {
+  if (process.platform !== 'win32') return { success: false, error: 'Keyboard control only supported on Windows' };
+  try {
+    // keys = ['ctrl', 'c'] etc.
+    const keyStr = keys.map(k => k.toLowerCase()).join('+');
+    const result = await ps(`
+      Add-Type -AssemblyName System.Windows.Forms
+      $wsh = New-Object -ComObject WScript.Shell
+      $wsh.SendKeys('${keyStr}')
+    `);
+    return { success: true };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+// ─── IPC: Screen Analysis ───
+ipcMain.handle('screen-capture', async () => {
+  try {
+    const file = path.join(app.getPath('temp'), `jarvis-screen-${Date.now()}.png`);
+    if (process.platform === 'win32') {
+      const escaped = file.replace(/'/g, "''");
+      const result = await ps(`Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $bmp.Save('${escaped}', [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose(); Write-Output '${escaped}'`);
+      if (result.success || fs.existsSync(file)) {
+        const imgBuffer = fs.readFileSync(file);
+        try { fs.unlinkSync(file); } catch {}
+        return { success: true, imageBase64: imgBuffer.toString('base64'), contentType: 'image/png' };
+      }
+    }
+    return { success: false, error: 'Screen capture only supported on Windows' };
+  } catch (err) { return { success: false, error: err.message }; }
+});
+
+ipcMain.handle('screen-analyze', async (_, question, apiKeys) => {
+  try {
+    // Take screenshot first
+    const capture = await (async () => {
+      const file = path.join(app.getPath('temp'), `jarvis-screen-${Date.now()}.png`);
+      const escaped = file.replace(/'/g, "''");
+      const result = await ps(`Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $bmp.Save('${escaped}', [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose(); Write-Output '${escaped}'`);
+      if (result.success || fs.existsSync(file)) {
+        const imgBuffer = fs.readFileSync(file);
+        try { fs.unlinkSync(file); } catch {}
+        return imgBuffer.toString('base64');
+      }
+      return null;
+    })();
+
+    if (!capture) return { success: false, error: 'Failed to capture screen' };
+
+    // Analyze with Groq vision or OpenAI vision
+    const groqKey = apiKeys?.groq || process.env.GROQ_API_KEY || '';
+    const openaiKey = apiKeys?.openai || process.env.OPENAI_API_KEY || '';
+
+    // Try OpenAI GPT-4o Vision
+    if (openaiKey) {
+      const bodyStr = JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: question || 'Describe what you see on this screen in detail.' },
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${capture}`, detail: 'low' } }
+          ]
+        }],
+        max_tokens: 1000,
+      });
+      const result = await httpsPostBuffer('https://api.openai.com/v1/chat/completions', Buffer.from(bodyStr, 'utf8'), {
+        'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}`,
+      });
+      if (result.statusCode === 200) {
+        const json = JSON.parse(result.data.toString('utf8'));
+        const text = json.choices?.[0]?.message?.content || '';
+        if (text) return { success: true, analysis: text, method: 'openai-vision' };
+      }
+    }
+
+    // Try Groq Vision (llama-3.2-90b-vision)
+    if (groqKey) {
+      const bodyStr = JSON.stringify({
+        model: 'llama-3.2-90b-vision-preview',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: question || 'Describe what you see on this screen.' },
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${capture}` } }
+          ]
+        }],
+        max_tokens: 1000,
+      });
+      const result = await httpsPostBuffer('https://api.groq.com/openai/v1/chat/completions', Buffer.from(bodyStr, 'utf8'), {
+        'Content-Type': 'application/json', 'Authorization': `Bearer ${groqKey}`,
+      });
+      if (result.statusCode === 200) {
+        const json = JSON.parse(result.data.toString('utf8'));
+        const text = json.choices?.[0]?.message?.content || '';
+        if (text) return { success: true, analysis: text, method: 'groq-vision' };
+      }
+    }
+
+    return { success: false, error: 'Screen analysis failed - no vision API available' };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ─── IPC: Multiple API Keys Management ───
+const MULTI_KEYS_PATH = path.join(app.getPath('userData'), 'jarvis-api-keys.json');
+
+function loadMultiKeys() {
+  try {
+    if (fs.existsSync(MULTI_KEYS_PATH)) {
+      return JSON.parse(fs.readFileSync(MULTI_KEYS_PATH, 'utf8'));
+    }
+  } catch {}
+  return { groq: [], gemini: [], openai: [], elevenlabs: [], sarvam: [] };
+}
+
+function saveMultiKeys(keys) {
+  try {
+    fs.writeFileSync(MULTI_KEYS_PATH, JSON.stringify(keys, null, 2), 'utf8');
+    return true;
+  } catch (err) {
+    log('ERROR', '[MultiKeys] Save error:', err.message);
+    return false;
+  }
+}
+
+ipcMain.handle('get-multi-keys', async () => {
+  return { success: true, keys: loadMultiKeys() };
+});
+
+ipcMain.handle('set-multi-keys', async (_, keys) => {
+  const saved = saveMultiKeys(keys);
+  return { success: saved };
+});
+
+ipcMain.handle('add-api-key', async (_, provider, key) => {
+  const keys = loadMultiKeys();
+  if (!keys[provider]) keys[provider] = [];
+  // Don't add duplicates
+  if (!keys[provider].includes(key)) {
+    keys[provider].push(key);
+    saveMultiKeys(keys);
+  }
+  return { success: true, keys };
+});
+
+ipcMain.handle('remove-api-key', async (_, provider, index) => {
+  const keys = loadMultiKeys();
+  if (keys[provider] && keys[provider].length > index) {
+    keys[provider].splice(index, 1);
+    saveMultiKeys(keys);
+  }
+  return { success: true, keys };
+});
+
+// IPC: Get active key for a provider (picks first available, or rotates)
+let keyRotationIndex = {};
+ipcMain.handle('get-active-key', async (_, provider) => {
+  const keys = loadMultiKeys();
+  const providerKeys = keys[provider] || [];
+  if (providerKeys.length === 0) {
+    // Fall back to .env keys
+    const envKey = process.env[`${provider.toUpperCase()}_API_KEY`] || '';
+    return { success: !!envKey, key: envKey };
+  }
+  // Simple round-robin rotation
+  if (!keyRotationIndex[provider]) keyRotationIndex[provider] = 0;
+  const idx = keyRotationIndex[provider] % providerKeys.length;
+  keyRotationIndex[provider]++;
+  return { success: true, key: providerKeys[idx] };
+});
+
+// ─── IPC: Play YouTube video (open + auto-click play) ───
+ipcMain.handle('play-youtube-auto', async (_, query) => {
+  try {
+    const searchUrl = query
+      ? `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`
+      : 'https://www.youtube.com';
+    await shell.openExternal(searchUrl);
+    
+    // Wait for browser to load, then simulate clicking first video
+    if (query && process.platform === 'win32') {
+      // Wait 3 seconds for YouTube to load in browser
+      await new Promise(r => setTimeout(r, 3000));
+      // Tab to first result and press Enter
+      await ps(`
+        Add-Type -AssemblyName System.Windows.Forms
+        Start-Sleep -Seconds 2
+        [System.Windows.Forms.SendKeys]::SendWait('{TAB}{TAB}{TAB}{TAB}{TAB}{ENTER}')
+      `);
+    }
+    return { success: true, message: query ? `YouTube: "${query}" playing` : 'YouTube opened' };
+  } catch (err) {
+    return { success: false, error: err.message };
   }
 });
 

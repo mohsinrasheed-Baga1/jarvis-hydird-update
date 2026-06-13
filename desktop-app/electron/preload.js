@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     if (queryOrUrl && queryOrUrl.startsWith('http')) return ipcRenderer.invoke('desktop-action', { type: 'play-youtube', url: queryOrUrl });
     return ipcRenderer.invoke('desktop-action', { type: 'play-youtube', query: queryOrUrl });
   },
+  playYoutubeAuto: (query) => ipcRenderer.invoke('play-youtube-auto', query),
   playAudio: (urlOrQuery) => ipcRenderer.invoke('desktop-action', { type: 'play-audio', url: urlOrQuery, query: urlOrQuery }),
   openWhatsApp: (phone, message) => ipcRenderer.invoke('desktop-action', { type: 'open-whatsapp', phone, message }),
   systemCommand: (cmd) => ipcRenderer.invoke('desktop-action', { type: 'system-command', command: cmd }),
@@ -52,13 +53,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showNotification: (title, body) => ipcRenderer.invoke('desktop-action', { type: 'notification', title, body }),
 
   // ─── Voice IPC — Direct STT & TTS through main process ───
-  // Transcribe pre-recorded audio (base64) via Groq/OpenAI Whisper in main process
   transcribeAudioBase64: (base64Audio, language, apiKeys) => ipcRenderer.invoke('transcribe-audio-base64', base64Audio, language, apiKeys),
-
-  // Generate TTS audio via ElevenLabs / OpenAI / Sarvam / Piper in main process
   generateTTS: (text, lang, emotion, apiKeys) => ipcRenderer.invoke('tts-generate', text, lang, emotion, apiKeys),
-
-  // ElevenLabs voice discovery
   getElevenLabsVoices: (apiKeys) => ipcRenderer.invoke('get-elevenlabs-voices', apiKeys),
 
   // Piper offline TTS
@@ -69,8 +65,33 @@ contextBridge.exposeInMainWorld('electronAPI', {
   testTTS: (lang) => ipcRenderer.invoke('test-tts', lang),
   onPiperDownloadProgress: (cb) => { ipcRenderer.on('piper-download-progress', (_, d) => cb(d)); },
 
-  // Direct chat completion via Groq/Gemini/OpenAI (bypasses Next.js backend)
+  // Direct chat completion via Groq/Gemini/OpenAI
   chatCompletion: (message, conversationHistory, activeProvider, apiKeys) => ipcRenderer.invoke('chat-completion', message, conversationHistory, activeProvider, apiKeys),
+
+  // ─── Terminal ───
+  terminalExecute: (command, cwd) => ipcRenderer.invoke('terminal-execute', command, cwd),
+  terminalCreateSession: () => ipcRenderer.invoke('terminal-create-session'),
+  terminalWrite: (sessionId, input) => ipcRenderer.invoke('terminal-write', sessionId, input),
+  terminalKill: (sessionId) => ipcRenderer.invoke('terminal-kill', sessionId),
+  onTerminalOutput: (cb) => { ipcRenderer.on('terminal-output', (_, d) => cb(d)); },
+
+  // ─── Mouse & Keyboard Control ───
+  mouseMove: (x, y) => ipcRenderer.invoke('mouse-move', x, y),
+  mouseClick: (x, y, button, clicks) => ipcRenderer.invoke('mouse-click', x, y, button, clicks),
+  keyboardType: (text) => ipcRenderer.invoke('keyboard-type', text),
+  keyboardPress: (key) => ipcRenderer.invoke('keyboard-press', key),
+  keyboardHotkey: (keys) => ipcRenderer.invoke('keyboard-hotkey', keys),
+
+  // ─── Screen Analysis ───
+  screenCapture: () => ipcRenderer.invoke('screen-capture'),
+  screenAnalyze: (question, apiKeys) => ipcRenderer.invoke('screen-analyze', question, apiKeys),
+
+  // ─── Multiple API Keys ───
+  getMultiKeys: () => ipcRenderer.invoke('get-multi-keys'),
+  setMultiKeys: (keys) => ipcRenderer.invoke('set-multi-keys', keys),
+  addApiKey: (provider, key) => ipcRenderer.invoke('add-api-key', provider, key),
+  removeApiKey: (provider, index) => ipcRenderer.invoke('remove-api-key', provider, index),
+  getActiveKey: (provider) => ipcRenderer.invoke('get-active-key', provider),
 
   // ─── CRM / Business Agent IPC ───
   crmGetAll: () => ipcRenderer.invoke('crm-get-all'),
