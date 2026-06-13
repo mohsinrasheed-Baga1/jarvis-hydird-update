@@ -3,9 +3,10 @@ import ChatPage from './pages/ChatPage';
 import SettingsPage from './pages/SettingsPage';
 import FilesPage from './pages/FilesPage';
 import AutomationPage from './pages/AutomationPage';
+import DashboardPage from './pages/DashboardPage';
 import { apiClient, type BackendState } from './services/apiClient';
 
-type Page = 'chat' | 'files' | 'automation' | 'settings';
+type Page = 'dashboard' | 'chat' | 'files' | 'automation' | 'settings';
 
 interface NavItem {
   id: Page;
@@ -14,6 +15,7 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
+  { id: 'dashboard', icon: 'D', label: 'Dashboard' },
   { id: 'chat', icon: 'C', label: 'Chat' },
   { id: 'files', icon: 'F', label: 'Files' },
   { id: 'automation', icon: 'A', label: 'Automation' },
@@ -21,7 +23,7 @@ const navItems: NavItem[] = [
 ];
 
 export default function App() {
-  const [currentPage, setCurrentPage] = useState<Page>('chat');
+  const [currentPage, setCurrentPage] = useState<Page>('dashboard');
   const [version, setVersion] = useState('...');
   const [backend, setBackend] = useState<BackendState>({ connected: false, label: 'Checking' });
   const [updateBanner, setUpdateBanner] = useState<{status: string; version?: string; percent?: number; speed?: string} | null>(null);
@@ -55,6 +57,8 @@ export default function App() {
 
   const renderPage = () => {
     switch (currentPage) {
+      case 'dashboard':
+        return <DashboardPage />;
       case 'chat':
         return <ChatPage backend={backend} />;
       case 'settings':
@@ -64,7 +68,7 @@ export default function App() {
       case 'automation':
         return <AutomationPage />;
       default:
-        return <ChatPage backend={backend} />;
+        return <DashboardPage />;
     }
   };
 
@@ -77,29 +81,36 @@ export default function App() {
           </div>
           <div className="min-w-0">
             <h1 className="text-base font-semibold tracking-wide text-white">JARVIS Hybrid</h1>
-            <p className="text-xs text-slate-500">Desktop Assistant</p>
+            <p className="text-xs text-slate-500">Business Agent v3.0.2</p>
           </div>
         </div>
 
         <nav className="flex-1 p-3 space-y-1">
-          {navItems.map(item => (
-            <button
-              key={item.id}
-              onClick={() => setCurrentPage(item.id)}
-              className={`w-full h-11 rounded-lg px-3 flex items-center gap-3 text-left transition-colors ${
-                currentPage === item.id
-                  ? 'bg-purple-600 text-white shadow-lg shadow-purple-950/40'
-                  : 'text-slate-400 hover:bg-slate-900 hover:text-slate-100'
-              }`}
-            >
-              <span className={`w-7 h-7 rounded-md flex items-center justify-center text-xs font-bold ${
-                currentPage === item.id ? 'bg-white/15' : 'bg-slate-900'
-              }`}>
-                {item.icon}
-              </span>
-              <span className="text-sm font-medium">{item.label}</span>
-            </button>
-          ))}
+          {navItems.map(item => {
+            const isDashboard = item.id === 'dashboard';
+            return (
+              <button
+                key={item.id}
+                onClick={() => setCurrentPage(item.id)}
+                className={`w-full h-11 rounded-lg px-3 flex items-center gap-3 text-left transition-all duration-300 ${
+                  currentPage === item.id
+                    ? isDashboard
+                      ? 'bg-gradient-to-r from-cyan-600 to-blue-600 text-white shadow-lg shadow-cyan-950/40'
+                      : 'bg-purple-600 text-white shadow-lg shadow-purple-950/40'
+                    : 'text-slate-400 hover:bg-slate-900 hover:text-slate-100'
+                }`}
+              >
+                <span className={`w-7 h-7 rounded-md flex items-center justify-center text-xs font-bold ${
+                  currentPage === item.id 
+                    ? isDashboard ? 'bg-white/20' : 'bg-white/15' 
+                    : 'bg-slate-900'
+                }`}>
+                  {isDashboard ? '⚡' : item.icon}
+                </span>
+                <span className="text-sm font-medium">{item.label}</span>
+              </button>
+            );
+          })}
         </nav>
 
         <div className="p-4 border-t border-slate-800 space-y-3">

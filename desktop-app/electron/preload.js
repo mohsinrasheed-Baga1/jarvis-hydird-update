@@ -72,6 +72,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Direct chat completion via Groq/Gemini/OpenAI (bypasses Next.js backend)
   chatCompletion: (message, conversationHistory, activeProvider, apiKeys) => ipcRenderer.invoke('chat-completion', message, conversationHistory, activeProvider, apiKeys),
 
+  // ─── CRM / Business Agent IPC ───
+  crmGetAll: () => ipcRenderer.invoke('crm-get-all'),
+  crmAddLead: (lead) => ipcRenderer.invoke('crm-add-lead', lead),
+  crmUpdateLead: (id, updates) => ipcRenderer.invoke('crm-update-lead', id, updates),
+  crmAddProposal: (proposal) => ipcRenderer.invoke('crm-add-proposal', proposal),
+  crmUpdateProposal: (id, updates) => ipcRenderer.invoke('crm-update-proposal', id, updates),
+  crmAddActivity: (activity) => ipcRenderer.invoke('crm-add-activity', activity),
+  crmGenerateProposal: (jobDescription, serviceType, clientName, apiKeys) => ipcRenderer.invoke('crm-generate-proposal', jobDescription, serviceType, clientName, apiKeys),
+  crmScoreLead: (leadData, apiKeys) => ipcRenderer.invoke('crm-score-lead', leadData, apiKeys),
+  crmCalculatePricing: (serviceType, complexity, apiKeys) => ipcRenderer.invoke('crm-calculate-pricing', serviceType, complexity, apiKeys),
+
   // Dev tools
   toggleDevTools: () => ipcRenderer.invoke('toggle-devtools'),
   checkWebVersion: () => ipcRenderer.invoke('check-web-version'),

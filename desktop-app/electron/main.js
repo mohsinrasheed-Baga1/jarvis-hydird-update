@@ -31,7 +31,7 @@ try {
 const CLOUD_APP_URL = 'http://127.0.0.1:3000';
 const VITE_DEV_URL = 'http://127.0.0.1:5173';
 const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
-const APP_VERSION = '3.0.1';
+const APP_VERSION = '3.0.2';
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
 const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
 const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
@@ -1189,9 +1189,9 @@ async function ensurePiperModel(lang) {
       fs.mkdirSync(PIPER_MODELS_DIR, { recursive: true });
     }
 
-    // Urdu model: Coqui TTS community Urdu model for Piper
+    // Urdu model: Piper fasih voice (natural Urdu)
     const modelFile = lang === 'ur'
-      ? 'ur_PK-hsmm-medium.onnx'
+      ? 'ur_PK-fasih-medium.onnx'
       : 'en_US-lessac-medium.onnx';
     const modelConfig = modelFile.replace('.onnx', '.onnx.json');
     const modelPath = path.join(PIPER_MODELS_DIR, modelFile);
@@ -1314,10 +1314,10 @@ ipcMain.handle('download-piper-model', async (_, lang) => {
     // Piper model URLs from the official HuggingFace repository
     const modelUrls = {
       ur: {
-        model: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/ur/ur_PK/hsmm/medium/ur_PK-hsmm-medium.onnx',
-        config: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/ur/ur_PK/hsmm/medium/ur_PK-hsmm-medium.onnx.json',
-        modelFile: 'ur_PK-hsmm-medium.onnx',
-        configFile: 'ur_PK-hsmm-medium.onnx.json',
+        model: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/ur/ur_PK/fasih/medium/ur_PK-fasih-medium.onnx',
+        config: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/ur/ur_PK/fasih/medium/ur_PK-fasih-medium.onnx.json',
+        modelFile: 'ur_PK-fasih-medium.onnx',
+        configFile: 'ur_PK-fasih-medium.onnx.json',
       },
       en: {
         model: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx',
@@ -1364,6 +1364,215 @@ ipcMain.handle('download-piper-binary', async () => {
   try {
     const result = await ensurePiperBinary();
     return result;
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ─── CRM Database (SQLite via better-sqlite3 fallback to JSON file) ───
+const CRM_DB_PATH = path.join(app.getPath('userData'), 'jarvis-crm.json');
+
+function loadCRM() {
+  try {
+    if (fs.existsSync(CRM_DB_PATH)) {
+      return JSON.parse(fs.readFileSync(CRM_DB_PATH, 'utf8'));
+    }
+  } catch (err) {
+    log('WARN', '[CRM] Load error:', err.message);
+  }
+  return { leads: [], proposals: [], clients: [], activities: [], settings: {} };
+}
+
+function saveCRM(data) {
+  try {
+    fs.writeFileSync(CRM_DB_PATH, JSON.stringify(data, null, 2), 'utf8');
+    return true;
+  } catch (err) {
+    log('ERROR', '[CRM] Save error:', err.message);
+    return false;
+  }
+}
+
+// IPC: CRM - Get all data
+ipcMain.handle('crm-get-all', async () => {
+  return { success: true, data: loadCRM() };
+});
+
+// IPC: CRM - Add lead
+ipcMain.handle('crm-add-lead', async (_, lead) => {
+  const crm = loadCRM();
+  const newLead = {
+    id: `lead_${Date.now()}`,
+    ...lead,
+    createdAt: new Date().toISOString(),
+    score: lead.score || 50,
+    status: lead.status || 'warm',
+  };
+  crm.leads.push(newLead);
+  crm.activities.push({
+    id: `act_${Date.now()}`,
+    agent: 'CRM Agent',
+    action: 'Lead Added',
+    detail: `${lead.client} - ${lead.service} from ${lead.platform}`,
+    time: new Date().toISOString(),
+    type: 'success',
+  });
+  saveCRM(crm);
+  return { success: true, lead: newLead };
+});
+
+// IPC: CRM - Update lead
+ipcMain.handle('crm-update-lead', async (_, id, updates) => {
+  const crm = loadCRM();
+  const idx = crm.leads.findIndex((l: any) => l.id === id);
+  if (idx === -1) return { success: false, error: 'Lead not found' };
+  crm.leads[idx] = { ...crm.leads[idx], ...updates };
+  saveCRM(crm);
+  return { success: true, lead: crm.leads[idx] };
+});
+
+// IPC: CRM - Add proposal
+ipcMain.handle('crm-add-proposal', async (_, proposal) => {
+  const crm = loadCRM();
+  const newProposal = {
+    id: `prop_${Date.now()}`,
+    ...proposal,
+    createdAt: new Date().toISOString(),
+    status: proposal.status || 'draft',
+  };
+  crm.proposals.push(newProposal);
+  crm.activities.push({
+    id: `act_${Date.now()}`,
+    agent: 'Proposal Agent',
+    action: 'Proposal Created',
+    detail: `${proposal.client} - ${proposal.service} - ${proposal.amount}`,
+    time: new Date().toISOString(),
+    type: 'info',
+  });
+  saveCRM(crm);
+  return { success: true, proposal: newProposal };
+});
+
+// IPC: CRM - Update proposal
+ipcMain.handle('crm-update-proposal', async (_, id, updates) => {
+  const crm = loadCRM();
+  const idx = crm.proposals.findIndex((p: any) => p.id === id);
+  if (idx === -1) return { success: false, error: 'Proposal not found' };
+  crm.proposals[idx] = { ...crm.proposals[idx], ...updates };
+  saveCRM(crm);
+  return { success: true, proposal: crm.proposals[idx] };
+});
+
+// IPC: CRM - Add activity
+ipcMain.handle('crm-add-activity', async (_, activity) => {
+  const crm = loadCRM();
+  crm.activities.push({
+    id: `act_${Date.now()}`,
+    ...activity,
+    time: new Date().toISOString(),
+  });
+  // Keep only last 200 activities
+  if (crm.activities.length > 200) {
+    crm.activities = crm.activities.slice(-200);
+  }
+  saveCRM(crm);
+  return { success: true };
+});
+
+// IPC: CRM - Generate proposal using AI
+ipcMain.handle('crm-generate-proposal', async (_, jobDescription, serviceType, clientName, apiKeys = {}) => {
+  try {
+    const activeProvider = apiKeys.groq ? 'groq' : apiKeys.gemini ? 'gemini' : apiKeys.openai ? 'openai' : 'groq';
+    const prompt = `You are JARVIS, a professional freelance proposal writer. Generate a compelling proposal for:
+
+Client: ${clientName || 'Potential Client'}
+Service: ${serviceType}
+Job Description: ${jobDescription}
+
+Create a professional proposal with:
+1. Greeting & hook (show understanding of their needs)
+2. Relevant experience & approach
+3. Timeline estimate
+4. Three pricing tiers (Basic, Standard, Premium) with specific deliverables
+5. Call to action
+
+Format: Clean, professional, ready to send. Use markdown formatting.
+Language: Match the client's language (English or Urdu/Roman Urdu based on job description).`;
+
+    const result = await generateChatCompletion(prompt, [], activeProvider, apiKeys);
+    if (result.success) {
+      return { success: true, proposal: result.content };
+    }
+    return { success: false, error: result.error || 'AI generation failed' };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: CRM - Score a lead
+ipcMain.handle('crm-score-lead', async (_, leadData, apiKeys = {}) => {
+  try {
+    const activeProvider = apiKeys.groq ? 'groq' : apiKeys.gemini ? 'gemini' : apiKeys.openai ? 'openai' : 'groq';
+    const prompt = `You are a lead scoring AI. Analyze this freelance lead and give a score from 0-100.
+
+Client: ${leadData.client || 'Unknown'}
+Platform: ${leadData.platform || 'Unknown'}
+Service: ${leadData.service || 'Unknown'}
+Budget: ${leadData.budget || 'Not specified'}
+Description: ${leadData.description || 'No description'}
+
+Score based on: budget realism, client seriousness, skill match, urgency, platform trust, competition, closing probability.
+
+Respond in JSON format only:
+{"score": <number>, "reasoning": "<brief explanation>", "action": "<recommended action>", "riskLevel": "<low/medium/high>"}`;
+
+    const result = await generateChatCompletion(prompt, [], activeProvider, apiKeys);
+    if (result.success) {
+      try {
+        // Try to extract JSON from the response
+        const jsonMatch = result.content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          return { success: true, scoring: JSON.parse(jsonMatch[0]) };
+        }
+      } catch {}
+      return { success: true, scoring: { score: 50, reasoning: result.content, action: 'Review manually', riskLevel: 'medium' } };
+    }
+    return { success: false, error: result.error || 'Scoring failed' };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: CRM - Calculate pricing
+ipcMain.handle('crm-calculate-pricing', async (_, serviceType, complexity, apiKeys = {}) => {
+  try {
+    const activeProvider = apiKeys.groq ? 'groq' : apiKeys.gemini ? 'gemini' : apiKeys.openai ? 'openai' : 'groq';
+    const prompt = `You are a freelance pricing expert for a developer who provides: Website, Desktop Software, Android Apps, Automation Systems, AI Tools.
+
+Service: ${serviceType}
+Complexity: ${complexity}
+
+Provide pricing in USD for a Pakistani freelancer. Respond ONLY in JSON format:
+{
+  "basic": {"price": <number>, "timeline": "<string>", "deliverables": ["<item1>", "<item2>"]},
+  "standard": {"price": <number>, "timeline": "<string>", "deliverables": ["<item1>", "<item2>", "<item3>"]},
+  "premium": {"price": <number>, "timeline": "<string>", "deliverables": ["<item1>", "<item2>", "<item3>", "<item4>"]},
+  "marketRate": "<low-high range>",
+  "negotiationRange": "<min-max>",
+  "notes": "<brief advice>"
+}`;
+
+    const result = await generateChatCompletion(prompt, [], activeProvider, apiKeys);
+    if (result.success) {
+      try {
+        const jsonMatch = result.content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          return { success: true, pricing: JSON.parse(jsonMatch[0]) };
+        }
+      } catch {}
+      return { success: true, pricing: { basic: { price: 500 }, standard: { price: 1500 }, premium: { price: 3000 }, notes: result.content } };
+    }
+    return { success: false, error: result.error || 'Pricing failed' };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -1543,7 +1752,7 @@ function downloadFile(urlStr, destPath) {
           port: pu.port || (pu.protocol === 'http:' ? 80 : 443),
           path: pu.pathname + pu.search,
           method: 'GET',
-          headers: { 'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.1' },
+          headers: { 'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.2' },
         };
         const req = m.request(opts, (res) => {
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -1566,7 +1775,7 @@ function downloadFile(urlStr, destPath) {
           });
         });
         req.on('error', (err) => resolve({ success: false, error: err.message }));
-        req.setTimeout(120000, () => { req.destroy(new Error('Download timeout')); resolve({ success: false, error: 'Download timeout' }); });
+        req.setTimeout(300000, () => { req.destroy(new Error('Download timeout')); resolve({ success: false, error: 'Download timeout' }); });
         req.end();
       };
 

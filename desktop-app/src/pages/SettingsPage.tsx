@@ -254,7 +254,7 @@ export default function SettingsPage() {
           <div className="grid grid-cols-2 gap-4">
             <div className="bg-slate-800 rounded-lg p-4">
               <p className="text-xs text-slate-500 mb-1">Current Version</p>
-              <p className="text-xl font-bold text-white">v3.0.1</p>
+              <p className="text-xl font-bold text-white">v3.0.2</p>
             </div>
             <div className="bg-slate-800 rounded-lg p-4">
               <p className="text-xs text-slate-500 mb-1">Latest Version</p>
@@ -583,7 +583,7 @@ export default function SettingsPage() {
         <section className="bg-slate-900 border border-slate-700 rounded-lg p-6">
           <h2 className="text-lg font-semibold text-white mb-3">About</h2>
           <div className="space-y-2 text-sm text-slate-400">
-            <p>JARVIS Hybrid v3.0.1</p>
+            <p>JARVIS Hybrid v3.0.2</p>
             <p>AI-Powered Desktop Assistant with Voice & Automation</p>
             <p className="text-xs text-slate-600">
               Voice: ElevenLabs + Edge TTS (free) + OpenAI + Sarvam + Piper (offline)
