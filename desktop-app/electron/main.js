@@ -31,7 +31,7 @@ try {
 const CLOUD_APP_URL = 'http://127.0.0.1:3000';
 const VITE_DEV_URL = 'http://127.0.0.1:5173';
 const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
-const APP_VERSION = '3.0.5';
+const APP_VERSION = '3.0.7';
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
 const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
 const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
