@@ -122,6 +122,29 @@ export default function ChatPage({ backend }: ChatPageProps) {
     }
   };
 
+  // Convert base64 audio to Blob URL (much more reliable than data URLs in Electron)
+  const base64ToBlobUrl = (base64: string, contentType: string): string => {
+    try {
+      const binaryString = atob(base64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: contentType || 'audio/mpeg' });
+      return URL.createObjectURL(blob);
+    } catch {
+      // Fallback to data URL if base64 conversion fails
+      return `data:${contentType || 'audio/mpeg'};base64,${base64}`;
+    }
+  };
+
+  // Clean up previous audio Blob URL
+  const cleanupAudioUrl = () => {
+    if (audioRef.current?.src?.startsWith('blob:')) {
+      URL.revokeObjectURL(audioRef.current.src);
+    }
+  };
+
   const speakAssistantResponse = async (text: string, emotion: string = 'normal') => {
     if (!voiceRepliesEnabled || !text.trim()) return;
 
@@ -137,46 +160,50 @@ export default function ChatPage({ backend }: ChatPageProps) {
         try {
           const ttsResult = await electronAPI.generateTTS(text, lang, emotion, apiKeys);
           if (ttsResult.success && ttsResult.audioBase64) {
-            const audioUrl = `data:${ttsResult.contentType};base64,${ttsResult.audioBase64}`;
+            // Use Blob URL instead of data URL — much more reliable in Electron
+            const audioUrl = base64ToBlobUrl(ttsResult.audioBase64, ttsResult.contentType || 'audio/mpeg');
+            cleanupAudioUrl();
             audioRef.current?.pause();
             audioRef.current = new Audio(audioUrl);
             audioRef.current.onplay = () => setSpeechStatus('Speaking...');
-            audioRef.current.onended = () => setSpeechStatus('');
+            audioRef.current.onended = () => { setSpeechStatus(''); cleanupAudioUrl(); };
             audioRef.current.onerror = () => {
-              // IPC TTS failed to play, try backend API
-              apiClient.textToSpeech(text, apiKeys, lang, emotion).then(blob => {
-                const url = URL.createObjectURL(blob);
-                audioRef.current = new Audio(url);
-                audioRef.current.onplay = () => setSpeechStatus('Speaking...');
-                audioRef.current.onended = () => { setSpeechStatus(''); URL.revokeObjectURL(url); };
-                audioRef.current.onerror = () => { URL.revokeObjectURL(url); fallbackSpeakAssistantResponse(text); };
-                audioRef.current.play().catch(() => fallbackSpeakAssistantResponse(text));
-              }).catch(() => fallbackSpeakAssistantResponse(text));
+              cleanupAudioUrl();
+              // IPC TTS audio failed to play — fall back to browser voice
+              console.warn('IPC TTS audio play failed, falling back to browser voice');
+              fallbackSpeakAssistantResponse(text);
             };
             await audioRef.current.play();
             return;
           }
+          // TTS provider returned failure — log and fall through
+          console.warn('IPC TTS failed:', ttsResult.error || 'No audio generated');
         } catch (ipcErr) {
-          // IPC TTS failed, fall through to backend API
-          console.warn('IPC TTS failed, trying backend:', ipcErr);
+          console.warn('IPC TTS exception, trying backend:', ipcErr);
         }
       }
 
-      // Backend API TTS
-      const blob = await apiClient.textToSpeech(text, apiKeys, lang, emotion);
-      const url = URL.createObjectURL(blob);
-      audioRef.current?.pause();
-      audioRef.current = new Audio(url);
-      audioRef.current.onplay = () => setSpeechStatus('Speaking...');
-      audioRef.current.onended = () => {
-        setSpeechStatus('');
-        URL.revokeObjectURL(url);
-      };
-      audioRef.current.onerror = () => {
-        URL.revokeObjectURL(url);
-        fallbackSpeakAssistantResponse(text);
-      };
-      await audioRef.current.play();
+      // Backend API TTS (requires Next.js backend running)
+      try {
+        const blob = await apiClient.textToSpeech(text, apiKeys, lang, emotion);
+        const url = URL.createObjectURL(blob);
+        cleanupAudioUrl();
+        audioRef.current?.pause();
+        audioRef.current = new Audio(url);
+        audioRef.current.onplay = () => setSpeechStatus('Speaking...');
+        audioRef.current.onended = () => { setSpeechStatus(''); URL.revokeObjectURL(url); };
+        audioRef.current.onerror = () => {
+          URL.revokeObjectURL(url);
+          fallbackSpeakAssistantResponse(text);
+        };
+        await audioRef.current.play();
+        return;
+      } catch (backendErr) {
+        console.warn('Backend TTS failed, using browser voice:', backendErr);
+      }
+
+      // Final fallback: Browser speechSynthesis
+      fallbackSpeakAssistantResponse(text);
     } catch {
       fallbackSpeakAssistantResponse(text);
     }
@@ -617,34 +644,41 @@ export default function ChatPage({ backend }: ChatPageProps) {
         </div>
       )}
 
-      {/* Confirmation Dialog */}
+      {/* Confirmation Dialog — Modal Overlay for high visibility */}
       {pendingConfirmation && (
-        <div className="mx-auto mt-4 max-w-5xl w-full px-6">
-          <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-5 py-4 space-y-3">
-            <div className="flex items-center gap-2">
-              <svg className="w-5 h-5 text-yellow-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
-              </svg>
-              <h3 className="text-yellow-200 font-medium text-sm">Confirmation Required</h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={(e) => { if (e.target === e.currentTarget) handleCancelConfirmation(); }}>
+          <div className="mx-4 w-full max-w-lg rounded-2xl border border-yellow-500/40 bg-slate-900/95 shadow-2xl shadow-yellow-500/10 px-6 py-6 space-y-4 animate-in">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-yellow-500/20">
+                <svg className="w-6 h-6 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-yellow-200 font-bold text-lg">تصدیق ضروری ہے</h3>
+                <p className="text-yellow-100/60 text-xs">Confirmation Required</p>
+              </div>
             </div>
-            <p className="text-yellow-100/90 text-sm">
-              {pendingConfirmation.command.confirmation}
+            <div className="bg-yellow-500/10 rounded-lg px-4 py-3">
+              <p className="text-yellow-100 text-base font-medium">
+                {pendingConfirmation.command.confirmation}
+              </p>
+            </div>
+            <p className="text-slate-500 text-xs">
+              کمانڈ: {JSON.stringify(pendingConfirmation.command.desktopAction)}
             </p>
-            <p className="text-yellow-100/60 text-xs">
-              Command: {JSON.stringify(pendingConfirmation.command.desktopAction)}
-            </p>
-            <div className="flex items-center gap-3 pt-1">
+            <div className="flex items-center gap-3 pt-2">
               <button
                 onClick={handleConfirmAutomation}
-                className="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white rounded-lg text-sm font-medium"
+                className="flex-1 px-5 py-3 bg-yellow-600 hover:bg-yellow-500 text-white rounded-xl text-sm font-bold transition-all hover:scale-[1.02] active:scale-95"
               >
-                Yes, Execute
+                ✅ ہاں، چلاؤ
               </button>
               <button
                 onClick={handleCancelConfirmation}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-sm"
+                className="flex-1 px-5 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-sm font-medium transition-all hover:scale-[1.02] active:scale-95"
               >
-                Cancel
+                ❌ منسوخ
               </button>
             </div>
           </div>

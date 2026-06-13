@@ -35,6 +35,9 @@ export default function SettingsPage() {
   const [piperStatus, setPiperStatus] = useState<any>(null);
   const [piperDownloading, setPiperDownloading] = useState<string | null>(null);
   const [piperProgress, setPiperProgress] = useState<any>(null);
+  const [edgeTTSInstalling, setEdgeTTSInstalling] = useState(false);
+  const [piperBinaryDownloading, setPiperBinaryDownloading] = useState(false);
+  const [testTTSStatus, setTestTTSStatus] = useState('');
 
   useEffect(() => {
     setApiKeys(storageService.getApiKeys());
@@ -123,6 +126,69 @@ export default function SettingsPage() {
       }
     } catch {}
     setVoiceLoading(false);
+  };
+
+  const installEdgeTTS = async () => {
+    const electronAPI = (window as any).electronAPI;
+    if (!electronAPI?.installEdgeTTS) return;
+    setEdgeTTSInstalling(true);
+    try {
+      const result = await electronAPI.installEdgeTTS();
+      if (result.success) {
+        // Refresh piper status to show edge-tts available
+        electronAPI.getPiperModelStatus?.().then((s: any) => setPiperStatus(s)).catch(() => {});
+      } else {
+        alert('Edge TTS install failed: ' + result.error);
+      }
+    } catch {
+      alert('Edge TTS install failed');
+    }
+    setEdgeTTSInstalling(false);
+  };
+
+  const downloadPiperBinary = async () => {
+    const electronAPI = (window as any).electronAPI;
+    if (!electronAPI?.downloadPiperBinary) return;
+    setPiperBinaryDownloading(true);
+    try {
+      const result = await electronAPI.downloadPiperBinary();
+      if (!result.success) {
+        alert('Piper binary download failed: ' + result.error);
+      } else {
+        // Refresh status
+        electronAPI.getPiperModelStatus?.().then((s: any) => setPiperStatus(s)).catch(() => {});
+      }
+    } catch {
+      alert('Piper binary download failed');
+    }
+    setPiperBinaryDownloading(false);
+  };
+
+  const testVoice = async (lang: string) => {
+    const electronAPI = (window as any).electronAPI;
+    if (!electronAPI?.testTTS) return;
+    setTestTTSStatus('Testing voice...');
+    try {
+      const result = await electronAPI.testTTS(lang);
+      if (result.success && result.audioBase64) {
+        // Play the test audio
+        const binaryString = atob(result.audioBase64);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+        const blob = new Blob([bytes], { type: result.contentType || 'audio/mpeg' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => { URL.revokeObjectURL(url); setTestTTSStatus('Test complete! ✅'); setTimeout(() => setTestTTSStatus(''), 3000); };
+        audio.onerror = () => { URL.revokeObjectURL(url); setTestTTSStatus('Test failed ❌'); setTimeout(() => setTestTTSStatus(''), 3000); };
+        await audio.play();
+      } else {
+        setTestTTSStatus('Test failed: ' + (result.error || 'No audio generated') + ' ❌');
+        setTimeout(() => setTestTTSStatus(''), 5000);
+      }
+    } catch {
+      setTestTTSStatus('Test error ❌');
+      setTimeout(() => setTestTTSStatus(''), 3000);
+    }
   };
 
   const downloadPiperModel = async (lang: string) => {
@@ -319,7 +385,7 @@ export default function SettingsPage() {
           </div>
 
           <p className="text-sm text-slate-400">
-            TTS priority: ElevenLabs → OpenAI → Sarvam → Piper (offline). 
+            TTS priority: ElevenLabs → Edge TTS (free) → OpenAI → Sarvam → Piper (offline). 
             STT uses Groq Whisper (fastest) then OpenAI Whisper (better quality).
           </p>
 
@@ -360,13 +426,63 @@ export default function SettingsPage() {
             )}
           </div>
 
+          {/* Edge TTS (Free, High Quality) */}
+          <div className="bg-slate-800 rounded-lg p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-medium text-slate-300">Edge TTS — Free, High Quality Urdu</h3>
+              <span className={`text-xs ${piperStatus?.edgeTTS?.available ? 'text-green-400' : 'text-slate-500'}`}>
+                {piperStatus?.edgeTTS?.available ? 'Installed ✅' : 'Not installed'}
+              </span>
+            </div>
+            <p className="text-xs text-slate-500">
+              Microsoft Edge TTS is completely FREE with no API key needed. It has excellent natural Urdu voices 
+              (Uzma, Asad). Requires internet connection. Best quality-to-cost ratio.
+            </p>
+            {!piperStatus?.edgeTTS?.available && (
+              <button
+                onClick={installEdgeTTS}
+                disabled={edgeTTSInstalling}
+                className="w-full px-3 py-2 text-xs bg-green-600 hover:bg-green-700 disabled:bg-slate-700 text-white rounded-lg"
+              >
+                {edgeTTSInstalling ? 'Installing...' : 'Install Edge TTS (pip install edge-tts)'}
+              </button>
+            )}
+            {piperStatus?.edgeTTS?.available && (
+              <div className="text-xs text-green-400">
+                ✅ Urdu voices: Uzma (female), Asad (male) — Free, no API key needed
+              </div>
+            )}
+          </div>
+
           {/* Piper Offline TTS */}
           <div className="bg-slate-800 rounded-lg p-4 space-y-3">
-            <h3 className="text-sm font-medium text-slate-300">Offline TTS (Piper) — No API needed</h3>
+            <h3 className="text-sm font-medium text-slate-300">Offline TTS (Piper) — No internet needed</h3>
             <p className="text-xs text-slate-500">
-              Piper TTS works offline with no API keys. Models are ~30-60MB. Good for 8GB RAM systems.
-              Urdu voice quality is acceptable but less natural than ElevenLabs.
+              Piper TTS works completely offline with no API keys. Models are ~30-60MB. 
+              Urdu voice quality is acceptable but less natural than Edge TTS or ElevenLabs.
+              Best for 8GB RAM systems.
             </p>
+
+            {/* Piper Binary Status */}
+            <div className="bg-slate-900 rounded-lg p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-white">Piper Engine</span>
+                {piperStatus?.binary?.ready ? (
+                  <span className="text-xs text-green-400">Installed ✅</span>
+                ) : (
+                  <span className="text-xs text-slate-500">Not installed</span>
+                )}
+              </div>
+              {!piperStatus?.binary?.ready && (
+                <button
+                  onClick={downloadPiperBinary}
+                  disabled={piperBinaryDownloading}
+                  className="w-full px-3 py-2 text-xs bg-cyan-600 hover:bg-cyan-700 disabled:bg-slate-700 text-white rounded-lg"
+                >
+                  {piperBinaryDownloading ? 'Downloading...' : 'Auto-Download Piper Engine (~15MB)'}
+                </button>
+              )}
+            </div>
 
             <div className="grid grid-cols-2 gap-3">
               {/* Urdu Model */}
@@ -433,9 +549,33 @@ export default function SettingsPage() {
             </div>
 
             <p className="text-xs text-slate-600">
-              Note: Piper binary must also be installed separately. 
-              Download from: github.com/rhasspy/piper/releases
+              Note: Piper binary auto-downloads on first use. You can also manually download from: github.com/rhasspy/piper/releases
             </p>
+          </div>
+
+          {/* Voice Test */}
+          <div className="bg-slate-800 rounded-lg p-4 space-y-3">
+            <h3 className="text-sm font-medium text-slate-300">Voice Test</h3>
+            <p className="text-xs text-slate-500">Test your TTS setup by generating a short audio clip.</p>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => testVoice('ur')}
+                disabled={!!testTTSStatus}
+                className="px-4 py-2 text-xs bg-purple-600 hover:bg-purple-700 disabled:bg-slate-700 text-white rounded-lg"
+              >
+                🔊 Test Urdu Voice
+              </button>
+              <button
+                onClick={() => testVoice('en')}
+                disabled={!!testTTSStatus}
+                className="px-4 py-2 text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 text-white rounded-lg"
+              >
+                🔊 Test English Voice
+              </button>
+            </div>
+            {testTTSStatus && (
+              <p className="text-xs text-slate-300">{testTTSStatus}</p>
+            )}
           </div>
         </section>
 
@@ -446,7 +586,7 @@ export default function SettingsPage() {
             <p>JARVIS Hybrid v3.0.1</p>
             <p>AI-Powered Desktop Assistant with Voice & Automation</p>
             <p className="text-xs text-slate-600">
-              Voice: ElevenLabs + OpenAI + Sarvam + Piper (offline)
+              Voice: ElevenLabs + Edge TTS (free) + OpenAI + Sarvam + Piper (offline)
               {' | '}STT: Groq Whisper + OpenAI Whisper
             </p>
           </div>

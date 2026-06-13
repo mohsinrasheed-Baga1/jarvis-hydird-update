@@ -64,6 +64,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Piper offline TTS
   getPiperModelStatus: () => ipcRenderer.invoke('piper-model-status'),
   downloadPiperModel: (lang) => ipcRenderer.invoke('download-piper-model', lang),
+  downloadPiperBinary: () => ipcRenderer.invoke('download-piper-binary'),
+  installEdgeTTS: () => ipcRenderer.invoke('install-edge-tts'),
+  testTTS: (lang) => ipcRenderer.invoke('test-tts', lang),
   onPiperDownloadProgress: (cb) => { ipcRenderer.on('piper-download-progress', (_, d) => cb(d)); },
 
   // Direct chat completion via Groq/Gemini/OpenAI (bypasses Next.js backend)

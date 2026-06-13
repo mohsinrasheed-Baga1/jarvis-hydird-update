@@ -849,20 +849,35 @@ ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur'
       return { success: false, error: 'Groq یا OpenAI API Key ضروری ہے۔ Settings میں جا کر API Key ڈالیں۔' };
     }
 
+    if (audioBuffer.length < 100) {
+      return { success: false, error: 'آڈیو بہت چھوٹا ہے۔ دوبارہ مائیک پر بولیں۔' };
+    }
+
     log('INFO', '[STT-IPC] Starting transcription, audio size:', audioBuffer.length, 'language:', language);
 
-    // Detect audio format from base64 header
+    // Detect audio format from binary header
     let filename = 'voice.webm';
     let contentType = 'audio/webm';
-    // Check if the original data was wav or mp3
     if (audioBuffer.length > 4) {
-      const header = audioBuffer.slice(0, 4).toString('hex');
+      const header = audioBuffer.slice(0, 12).toString('hex');
       if (header.startsWith('52494646')) { // RIFF = WAV
         filename = 'voice.wav';
         contentType = 'audio/wav';
-      } else if (header.startsWith('ffd8ff') || header.startsWith('fffb') || header.startsWith('fff3')) { // MP3
+        log('INFO', '[STT-IPC] Detected WAV format');
+      } else if (header.startsWith('fff3') || header.startsWith('fffb') || header.startsWith('ffe3') || header.startsWith('49443303')) { // MP3 / ID3
         filename = 'voice.mp3';
         contentType = 'audio/mpeg';
+        log('INFO', '[STT-IPC] Detected MP3 format');
+      } else if (header.startsWith('1a45dfa3') || header.includes('a1')) { // WebM / MKV
+        filename = 'voice.webm';
+        contentType = 'audio/webm';
+        log('INFO', '[STT-IPC] Detected WebM/MKV format');
+      } else if (header.startsWith('4f676753')) { // OGG
+        filename = 'voice.ogg';
+        contentType = 'audio/ogg';
+        log('INFO', '[STT-IPC] Detected OGG format');
+      } else {
+        log('INFO', '[STT-IPC] Unknown audio format, defaulting to webm. Header:', header.substring(0, 16));
       }
     }
 
@@ -894,11 +909,17 @@ ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur'
               log('INFO', '[STT-IPC] Groq Whisper success:', json.text.substring(0, 80));
               return { success: true, text: json.text.trim(), method: 'groq-whisper-ipc', language: json.language || whisperLang };
             }
+            log('WARN', '[STT-IPC] Groq returned empty text');
           } catch (parseErr) {
             log('WARN', '[STT-IPC] Groq JSON parse error:', parseErr.message);
           }
         } else {
-          log('WARN', '[STT-IPC] Groq failed:', result.statusCode, result.data.toString('utf8').substring(0, 200));
+          const errBody = result.data.toString('utf8').substring(0, 300);
+          log('WARN', '[STT-IPC] Groq failed:', result.statusCode, errBody);
+          // If 401, API key is invalid — don't waste time retrying
+          if (result.statusCode === 401) {
+            return { success: false, error: 'Groq API Key غلط ہے۔ Settings میں درست Key ڈالیں۔' };
+          }
         }
       } catch (err) {
         log('WARN', '[STT-IPC] Groq error:', err.message);
@@ -930,11 +951,16 @@ ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur'
               log('INFO', '[STT-IPC] OpenAI Whisper success:', json.text.substring(0, 80));
               return { success: true, text: json.text.trim(), method: 'openai-whisper-ipc', language: json.language || whisperLang };
             }
+            log('WARN', '[STT-IPC] OpenAI returned empty text');
           } catch (parseErr) {
             log('WARN', '[STT-IPC] OpenAI JSON parse error:', parseErr.message);
           }
         } else {
-          log('WARN', '[STT-IPC] OpenAI failed:', result.statusCode, result.data.toString('utf8').substring(0, 200));
+          const errBody = result.data.toString('utf8').substring(0, 300);
+          log('WARN', '[STT-IPC] OpenAI failed:', result.statusCode, errBody);
+          if (result.statusCode === 401) {
+            return { success: false, error: 'OpenAI API Key غلط ہے۔ Settings میں درست Key ڈالیں۔' };
+          }
         }
       } catch (err) {
         log('WARN', '[STT-IPC] OpenAI error:', err.message);
@@ -1023,9 +1049,139 @@ function httpsGetBuffer(urlStr, headers) {
   });
 }
 
+// ─── Edge TTS (Microsoft, free, excellent Urdu quality) ───
+// Uses Python edge-tts package: pip install edge-tts
+// This is an ONLINE service but FREE with no API key needed
+
+const EDGE_TTS_VOICES = {
+  ur: 'ur-PK-UzmaNeural',      // Best Urdu female voice
+  en: 'en-US-AriaNeural',       // Best English female voice
+  ur_male: 'ur-PK-AsadNeural',  // Urdu male voice
+  en_male: 'en-US-GuyNeural',   // English male voice
+};
+
+async function generateEdgeTTS(text, lang) {
+  try {
+    // Try Python edge-tts command
+    const voice = EDGE_TTS_VOICES[lang] || EDGE_TTS_VOICES.ur;
+    const outputFile = path.join(app.getPath('temp'), `edge-tts-${Date.now()}.mp3`);
+
+    // First check if edge-tts is installed
+    const checkResult = await runCommand('python', ['-c', 'import edge_tts; print("ok")'], { timeout: 5000 });
+    if (!checkResult.success || !checkResult.stdout.includes('ok')) {
+      // Try pip install edge-tts
+      log('INFO', '[EdgeTTS] Installing edge-tts...');
+      const installResult = await runCommand('pip', ['install', 'edge-tts', '-q'], { timeout: 60000 });
+      if (!installResult.success) {
+        log('WARN', '[EdgeTTS] Failed to install edge-tts:', installResult.error);
+        return { success: false, error: 'edge-tts Python package install failed' };
+      }
+    }
+
+    const result = await runCommand('edge-tts', [
+      '--voice', voice,
+      '--text', text.substring(0, 5000),
+      '--write-media', outputFile,
+      '--rate', '+0%',
+    ], { timeout: 30000 });
+
+    if (fs.existsSync(outputFile)) {
+      const audioBuffer = fs.readFileSync(outputFile);
+      try { fs.unlinkSync(outputFile); } catch {}
+      if (audioBuffer.length > 100) {
+        log('INFO', '[EdgeTTS] Success, size:', audioBuffer.length, 'voice:', voice);
+        return { success: true, audioBase64: audioBuffer.toString('base64'), contentType: 'audio/mpeg', method: 'edge-tts' };
+      }
+    }
+    return { success: false, error: 'Edge TTS generation failed: ' + (result.error || result.stderr || 'unknown') };
+  } catch (err) {
+    log('WARN', '[EdgeTTS] Error:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
 // Piper TTS offline engine
 let piperProcess = null;
 const PIPER_MODELS_DIR = path.join(app.getPath('userData'), 'piper-models');
+const PIPER_BIN_DIR = path.join(app.getPath('userData'), 'piper');
+
+// Auto-download Piper binary if not found
+async function ensurePiperBinary() {
+  try {
+    const piperBin = process.platform === 'win32' ? 'piper.exe' : 'piper';
+    const localPiperPath = path.join(PIPER_BIN_DIR, piperBin);
+
+    // Already downloaded?
+    if (fs.existsSync(localPiperPath)) {
+      return { ready: true, path: localPiperPath };
+    }
+
+    // Check PATH
+    try {
+      const whichResult = await runCommand(process.platform === 'win32' ? 'where' : 'which', [piperBin]);
+      if (whichResult.success && whichResult.stdout.trim()) {
+        const foundPath = whichResult.stdout.trim().split('\n')[0].trim();
+        return { ready: true, path: foundPath };
+      }
+    } catch {}
+
+    // Auto-download Piper binary for Windows
+    if (process.platform === 'win32') {
+      log('INFO', '[Piper] Auto-downloading piper.exe...');
+      if (!fs.existsSync(PIPER_BIN_DIR)) {
+        fs.mkdirSync(PIPER_BIN_DIR, { recursive: true });
+      }
+
+      // Download Piper Windows release
+      const piperVersion = '2023.11.14-2';
+      const piperUrl = `https://github.com/rhasspy/piper/releases/download/${piperVersion}/piper_windows_amd64.zip`;
+      const zipPath = path.join(PIPER_BIN_DIR, 'piper.zip');
+
+      const downloadResult = await downloadFile(piperUrl, zipPath);
+      if (!downloadResult.success) {
+        log('WARN', '[Piper] Download failed:', downloadResult.error);
+        return { ready: false, error: 'Piper binary download failed: ' + downloadResult.error };
+      }
+
+      // Extract using PowerShell
+      const extractResult = await ps(`Expand-Archive -Path '${zipPath}' -DestinationPath '${PIPER_BIN_DIR}' -Force`);
+      try { fs.unlinkSync(zipPath); } catch {}
+
+      if (extractResult.success || fs.existsSync(localPiperPath)) {
+        log('INFO', '[Piper] Binary downloaded and extracted successfully');
+        return { ready: true, path: localPiperPath };
+      }
+
+      // Check if piper.exe is in a subdirectory
+      const subDir = path.join(PIPER_BIN_DIR, 'piper');
+      const subPiperPath = path.join(subDir, piperBin);
+      if (fs.existsSync(subPiperPath)) {
+        // Move to expected location
+        try {
+          const files = fs.readdirSync(subDir);
+          for (const file of files) {
+            const src = path.join(subDir, file);
+            const dest = path.join(PIPER_BIN_DIR, file);
+            if (!fs.existsSync(dest)) {
+              fs.copyFileSync(src, dest);
+            }
+          }
+        } catch {}
+        if (fs.existsSync(localPiperPath)) {
+          return { ready: true, path: localPiperPath };
+        }
+        return { ready: true, path: subPiperPath };
+      }
+
+      return { ready: false, error: 'Piper binary not found after extraction' };
+    }
+
+    return { ready: false, error: 'Piper binary auto-download only supported on Windows. Install manually.' };
+  } catch (err) {
+    log('WARN', '[Piper] Binary check error:', err.message);
+    return { ready: false, error: err.message };
+  }
+}
 
 async function ensurePiperModel(lang) {
   try {
@@ -1060,27 +1216,14 @@ async function generatePiperTTS(text, lang) {
       return { success: false, error: 'Piper model not downloaded. Go to Settings > Voice to download offline models.' };
     }
 
-    // Try to find piper binary
-    const piperBin = process.platform === 'win32' ? 'piper.exe' : 'piper';
-    const localPiperPath = path.join(app.getPath('userData'), 'piper', piperBin);
-
-    let piperCmd = localPiperPath;
-    if (!fs.existsSync(piperCmd)) {
-      // Check if piper is in PATH
-      try {
-        const whichResult = await runCommand(process.platform === 'win32' ? 'where' : 'which', [piperBin]);
-        if (whichResult.success && whichResult.stdout.trim()) {
-          piperCmd = whichResult.stdout.trim().split('\n')[0].trim();
-        } else {
-          return { success: false, error: 'Piper TTS engine not installed. Install from Settings > Voice.' };
-        }
-      } catch {
-        return { success: false, error: 'Piper TTS engine not installed. Install from Settings > Voice.' };
-      }
+    // Try to find or auto-download piper binary
+    const binaryInfo = await ensurePiperBinary();
+    if (!binaryInfo.ready) {
+      return { success: false, error: 'Piper TTS engine not installed: ' + (binaryInfo.error || 'Auto-download failed') };
     }
 
     const outputFile = path.join(app.getPath('temp'), `piper-tts-${Date.now()}.wav`);
-    const result = await runCommand(piperCmd, [
+    const result = await runCommand(binaryInfo.path, [
       '--model', modelInfo.modelPath,
       '--config', modelInfo.configPath,
       '--output_file', outputFile,
@@ -1106,188 +1249,7 @@ async function generatePiperTTS(text, lang) {
 
 ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', apiKeys = {}) => {
   try {
-    if (!text || !text.trim()) {
-      return { success: false, error: 'No text provided for TTS' };
-    }
-
-    const elevenlabsKey = apiKeys.elevenlabs || process.env.ELEVENLABS_API_KEY || '';
-    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
-    const sarvamKey = apiKeys.sarvam || process.env.SARVAM_API_KEY || '';
-
-    log('INFO', '[TTS-IPC] Generating TTS, lang:', lang, 'emotion:', emotion, 'text length:', text.length);
-
-    // ─── Try ElevenLabs with dynamic voice discovery ───
-    if (elevenlabsKey) {
-      try {
-        // Discover available voices
-        const voiceInfo = await discoverElevenLabsVoices(elevenlabsKey);
-
-        // Determine best voice for language
-        let voiceId = null;
-        let modelId = 'eleven_turbo_v2_5';
-
-        if (voiceInfo) {
-          // Priority: Cloned voice > Urdu/Hindi voice for Urdu > English voice for English > First available
-          if (lang === 'ur') {
-            if (voiceInfo.cloned?.length > 0) {
-              voiceId = voiceInfo.cloned[0].voice_id;
-              modelId = 'eleven_multilingual_v2';
-            } else if (voiceInfo.urdu?.length > 0) {
-              voiceId = voiceInfo.urdu[0].voice_id;
-              modelId = 'eleven_multilingual_v2';
-            }
-          } else {
-            if (voiceInfo.cloned?.length > 0) {
-              voiceId = voiceInfo.cloned[0].voice_id;
-            } else if (voiceInfo.english?.length > 0) {
-              voiceId = voiceInfo.english[0].voice_id;
-            }
-          }
-
-          // If no language-matched voice, try any voice with multilingual model
-          if (!voiceId && voiceInfo.all?.length > 0) {
-            voiceId = voiceInfo.all[0].voice_id;
-            modelId = 'eleven_multilingual_v2';
-          }
-        }
-
-        // Fallback to well-known default voices (available on all ElevenLabs accounts)
-        if (!voiceId) {
-          // Default ElevenLabs voices that work with all accounts
-          const defaultVoices = {
-            ur: '21m00Tcm4TlvDq8ikWAM', // Rachel - works well with multilingual
-            en: 'EXAVITQu4vr4xnSDxMaL', // Bella
-          };
-          voiceId = defaultVoices[lang] || defaultVoices.ur;
-          modelId = 'eleven_multilingual_v2';
-        }
-
-        log('INFO', '[TTS-IPC] ElevenLabs using voice:', voiceId, 'model:', modelId);
-
-        const emotionSettings = {
-          happy: { stability: 0.35, similarity: 0.75, style: 0.8 },
-          serious: { stability: 0.55, similarity: 0.8, style: 0.4 },
-          sympathetic: { stability: 0.5, similarity: 0.78, style: 0.6 },
-          surprised: { stability: 0.3, similarity: 0.72, style: 0.85 },
-          encouraging: { stability: 0.4, similarity: 0.76, style: 0.7 },
-          normal: { stability: 0.4, similarity: 0.78, style: 0.55 },
-        };
-        const settings = emotionSettings[emotion] || emotionSettings.normal;
-        const bodyStr = JSON.stringify({
-          text: text.substring(0, 5000),
-          model_id: modelId,
-          voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, style: settings.style, use_speaker_boost: true },
-          output_format: 'mp3_44100_128',
-        });
-
-        const result = await httpsPostBuffer(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, Buffer.from(bodyStr, 'utf8'), {
-          'Content-Type': 'application/json',
-          'xi-api-key': elevenlabsKey,
-          'Accept': 'audio/mpeg',
-        });
-
-        if (result.statusCode === 200 && result.data.length > 500) {
-          log('INFO', '[TTS-IPC] ElevenLabs success, size:', result.data.length);
-          return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'elevenlabs-ipc' };
-        }
-        log('WARN', '[TTS-IPC] ElevenLabs failed:', result.statusCode, 'size:', result.data.length);
-
-        // If turbo v2.5 failed, try multilingual v2
-        if (modelId !== 'eleven_multilingual_v2') {
-          const bodyStr2 = JSON.stringify({
-            text: text.substring(0, 5000),
-            model_id: 'eleven_multilingual_v2',
-            voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, style: settings.style, use_speaker_boost: true },
-            output_format: 'mp3_44100_128',
-          });
-          const result2 = await httpsPostBuffer(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, Buffer.from(bodyStr2, 'utf8'), {
-            'Content-Type': 'application/json',
-            'xi-api-key': elevenlabsKey,
-            'Accept': 'audio/mpeg',
-          });
-          if (result2.statusCode === 200 && result2.data.length > 500) {
-            log('INFO', '[TTS-IPC] ElevenLabs multilingual v2 success, size:', result2.data.length);
-            return { success: true, audioBase64: result2.data.toString('base64'), contentType: 'audio/mpeg', method: 'elevenlabs-ipc' };
-          }
-        }
-      } catch (err) {
-        log('WARN', '[TTS-IPC] ElevenLabs error:', err.message);
-      }
-    }
-
-    // ─── Try OpenAI TTS HD ───
-    if (openaiKey) {
-      try {
-        const bodyStr = JSON.stringify({
-          model: 'tts-1-hd',
-          input: text.substring(0, 4096),
-          voice: lang === 'ur' ? 'alloy' : 'nova',
-          speed: 1.0,
-        });
-
-        const result = await httpsPostBuffer('https://api.openai.com/v1/audio/speech', Buffer.from(bodyStr, 'utf8'), {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${openaiKey}`,
-        });
-
-        if (result.statusCode === 200 && result.data.length > 500) {
-          log('INFO', '[TTS-IPC] OpenAI TTS success, size:', result.data.length);
-          return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'openai-tts-ipc' };
-        }
-        log('WARN', '[TTS-IPC] OpenAI TTS failed:', result.statusCode);
-      } catch (err) {
-        log('WARN', '[TTS-IPC] OpenAI TTS error:', err.message);
-      }
-    }
-
-    // ─── Try Sarvam AI (good for Urdu/Hindi) ───
-    if (sarvamKey) {
-      try {
-        const targetLang = lang === 'ur' ? 'hi-IN' : 'en';
-        const bodyStr = JSON.stringify({
-          inputs: [text.substring(0, 3000)],
-          target_language_code: targetLang,
-          speaker_id: 'anushka',
-          pitch: 0,
-          pace: 1.0,
-          loudness: 1.5,
-          speech_sample_rate: 24000,
-          enable_preprocessing: true,
-          model: 'bulbul:v1',
-        });
-
-        const result = await httpsPostBuffer('https://api.sarvam.ai/text-to-speech', Buffer.from(bodyStr, 'utf8'), {
-          'Content-Type': 'application/json',
-          'api-subscription-key': sarvamKey,
-        });
-
-        if (result.statusCode === 200) {
-          try {
-            const json = JSON.parse(result.data.toString('utf8'));
-            if (json.audios && json.audios[0]) {
-              const audioBuffer = Buffer.from(json.audios[0], 'base64');
-              if (audioBuffer.length > 500) {
-                log('INFO', '[TTS-IPC] Sarvam AI success, size:', audioBuffer.length);
-                return { success: true, audioBase64: audioBuffer.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
-              }
-            }
-          } catch {}
-          if (result.data.length > 500) {
-            log('INFO', '[TTS-IPC] Sarvam AI direct audio, size:', result.data.length);
-            return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
-          }
-        }
-        log('WARN', '[TTS-IPC] Sarvam failed:', result.statusCode);
-      } catch (err) {
-        log('WARN', '[TTS-IPC] Sarvam error:', err.message);
-      }
-    }
-
-    // ─── Try Piper TTS (offline) ───
-    const piperResult = await generatePiperTTS(text, lang);
-    if (piperResult.success) return piperResult;
-
-    return { success: false, error: 'تمام آواز پرووائڈرز ناکام۔ Settings میں ElevenLabs یا OpenAI Key ڈالیں۔' };
+    return await generateTTSInternal(text, lang, emotion, apiKeys);
   } catch (err) {
     log('ERROR', '[TTS-IPC] Error:', err.message);
     return { success: false, error: err.message };
@@ -1321,11 +1283,16 @@ ipcMain.handle('piper-model-status', async () => {
   try {
     const urModel = await ensurePiperModel('ur');
     const enModel = await ensurePiperModel('en');
+    const binaryInfo = await ensurePiperBinary();
+    const edgeCheck = await runCommand('python', ['-c', 'import edge_tts; print("ok")'], { timeout: 5000 });
     return {
       success: true,
       urdu: { ready: urModel.ready, modelPath: urModel.modelPath },
       english: { ready: enModel.ready, modelPath: enModel.modelPath },
+      binary: { ready: binaryInfo.ready, path: binaryInfo.path },
+      edgeTTS: { available: edgeCheck.success && edgeCheck.stdout.includes('ok') },
       modelsDir: PIPER_MODELS_DIR,
+      binDir: PIPER_BIN_DIR,
     };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1391,6 +1358,172 @@ ipcMain.handle('download-piper-model', async (_, lang) => {
     return { success: false, error: err.message };
   }
 });
+
+// IPC: Download Piper binary
+ipcMain.handle('download-piper-binary', async () => {
+  try {
+    const result = await ensurePiperBinary();
+    return result;
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: Install edge-tts Python package
+ipcMain.handle('install-edge-tts', async () => {
+  try {
+    log('INFO', '[EdgeTTS] Installing via pip...');
+    const result = await runCommand('pip', ['install', 'edge-tts', '-q'], { timeout: 120000 });
+    if (result.success) {
+      log('INFO', '[EdgeTTS] Installed successfully');
+      return { success: true, message: 'edge-tts installed successfully' };
+    }
+    return { success: false, error: result.error || 'Install failed' };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: Test TTS - generate short test audio
+ipcMain.handle('test-tts', async (_, lang = 'ur') => {
+  try {
+    const testText = lang === 'ur' ? 'سلام، میں جاروس ہوں۔ آواز ٹیسٹ کامیاب!' : 'Hello, I am JARVIS. Voice test successful!';
+    const apiKeys = {
+      elevenlabs: process.env.ELEVENLABS_API_KEY || '',
+      openai: process.env.OPENAI_API_KEY || '',
+      sarvam: process.env.SARVAM_API_KEY || '',
+    };
+    // Directly call the TTS generation logic (same cascade as tts-generate)
+    if (!testText || !testText.trim()) {
+      return { success: false, error: 'No text provided for TTS test' };
+    }
+    // Re-use the full TTS pipeline by emitting the same logic
+    // We call generateTTSInternal directly
+    const result = await generateTTSInternal(testText, lang, 'normal', apiKeys);
+    return result;
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Internal TTS generation function (shared by tts-generate and test-tts)
+async function generateTTSInternal(text, lang = 'ur', emotion = 'normal', apiKeys = {}) {
+  if (!text || !text.trim()) {
+    return { success: false, error: 'No text provided for TTS' };
+  }
+
+  const elevenlabsKey = apiKeys.elevenlabs || process.env.ELEVENLABS_API_KEY || '';
+  const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+  const sarvamKey = apiKeys.sarvam || process.env.SARVAM_API_KEY || '';
+
+  log('INFO', '[TTS] Generating, lang:', lang, 'emotion:', emotion, 'text length:', text.length);
+
+  // ─── Try ElevenLabs ───
+  if (elevenlabsKey) {
+    try {
+      const voiceInfo = await discoverElevenLabsVoices(elevenlabsKey);
+      let voiceId = null;
+      let modelId = 'eleven_turbo_v2_5';
+
+      if (voiceInfo) {
+        if (lang === 'ur') {
+          if (voiceInfo.cloned?.length > 0) { voiceId = voiceInfo.cloned[0].voice_id; modelId = 'eleven_multilingual_v2'; }
+          else if (voiceInfo.urdu?.length > 0) { voiceId = voiceInfo.urdu[0].voice_id; modelId = 'eleven_multilingual_v2'; }
+        } else {
+          if (voiceInfo.cloned?.length > 0) { voiceId = voiceInfo.cloned[0].voice_id; }
+          else if (voiceInfo.english?.length > 0) { voiceId = voiceInfo.english[0].voice_id; }
+        }
+        if (!voiceId && voiceInfo.all?.length > 0) { voiceId = voiceInfo.all[0].voice_id; modelId = 'eleven_multilingual_v2'; }
+      }
+      if (!voiceId) {
+        voiceId = (lang === 'ur' ? '21m00Tcm4TlvDq8ikWAM' : 'EXAVITQu4vr4xnSDxMaL');
+        modelId = 'eleven_multilingual_v2';
+      }
+
+      const emotionSettings = {
+        happy: { stability: 0.35, similarity: 0.75, style: 0.8 },
+        serious: { stability: 0.55, similarity: 0.8, style: 0.4 },
+        sympathetic: { stability: 0.5, similarity: 0.78, style: 0.6 },
+        surprised: { stability: 0.3, similarity: 0.72, style: 0.85 },
+        encouraging: { stability: 0.4, similarity: 0.76, style: 0.7 },
+        normal: { stability: 0.4, similarity: 0.78, style: 0.55 },
+      };
+      const settings = emotionSettings[emotion] || emotionSettings.normal;
+      const bodyStr = JSON.stringify({
+        text: text.substring(0, 5000), model_id: modelId,
+        voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, style: settings.style, use_speaker_boost: true },
+        output_format: 'mp3_44100_128',
+      });
+
+      const result = await httpsPostBuffer(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, Buffer.from(bodyStr, 'utf8'), {
+        'Content-Type': 'application/json', 'xi-api-key': elevenlabsKey.trim(), 'Accept': 'audio/mpeg',
+      });
+      if (result.statusCode === 200 && result.data.length > 100) {
+        return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'elevenlabs-ipc' };
+      }
+      // Try multilingual v2 fallback
+      if (result.statusCode !== 401 && modelId !== 'eleven_multilingual_v2') {
+        const bodyStr2 = JSON.stringify({
+          text: text.substring(0, 5000), model_id: 'eleven_multilingual_v2',
+          voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, style: settings.style, use_speaker_boost: true },
+          output_format: 'mp3_44100_128',
+        });
+        const result2 = await httpsPostBuffer(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, Buffer.from(bodyStr2, 'utf8'), {
+          'Content-Type': 'application/json', 'xi-api-key': elevenlabsKey.trim(), 'Accept': 'audio/mpeg',
+        });
+        if (result2.statusCode === 200 && result2.data.length > 100) {
+          return { success: true, audioBase64: result2.data.toString('base64'), contentType: 'audio/mpeg', method: 'elevenlabs-ipc' };
+        }
+      }
+    } catch (err) { log('WARN', '[TTS] ElevenLabs error:', err.message); }
+  }
+
+  // ─── Try Edge TTS (free) ───
+  const edgeResult = await generateEdgeTTS(text, lang);
+  if (edgeResult.success) return edgeResult;
+
+  // ─── Try OpenAI TTS ───
+  if (openaiKey) {
+    try {
+      const bodyStr = JSON.stringify({ model: 'tts-1-hd', input: text.substring(0, 4096), voice: lang === 'ur' ? 'alloy' : 'nova', speed: 1.0 });
+      const result = await httpsPostBuffer('https://api.openai.com/v1/audio/speech', Buffer.from(bodyStr, 'utf8'), {
+        'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}`,
+      });
+      if (result.statusCode === 200 && result.data.length > 100) {
+        return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'openai-tts-ipc' };
+      }
+    } catch (err) { log('WARN', '[TTS] OpenAI error:', err.message); }
+  }
+
+  // ─── Try Sarvam AI ───
+  if (sarvamKey) {
+    try {
+      const bodyStr = JSON.stringify({
+        inputs: [text.substring(0, 3000)], target_language_code: lang === 'ur' ? 'hi-IN' : 'en',
+        speaker_id: 'anushka', model: 'bulbul:v1', pace: 1.0, loudness: 1.5, speech_sample_rate: 24000, enable_preprocessing: true,
+      });
+      const result = await httpsPostBuffer('https://api.sarvam.ai/text-to-speech', Buffer.from(bodyStr, 'utf8'), {
+        'Content-Type': 'application/json', 'api-subscription-key': sarvamKey,
+      });
+      if (result.statusCode === 200) {
+        try {
+          const json = JSON.parse(result.data.toString('utf8'));
+          if (json.audios?.[0]) {
+            const audioBuffer = Buffer.from(json.audios[0], 'base64');
+            if (audioBuffer.length > 100) return { success: true, audioBase64: audioBuffer.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
+          }
+        } catch {}
+        if (result.data.length > 100) return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
+      }
+    } catch (err) { log('WARN', '[TTS] Sarvam error:', err.message); }
+  }
+
+  // ─── Try Piper TTS (offline) ───
+  const piperResult = await generatePiperTTS(text, lang);
+  if (piperResult.success) return piperResult;
+
+  return { success: false, error: 'تمام آواز پرووائڈرز ناکام۔ Settings میں ElevenLabs یا OpenAI Key ڈالیں، یا Edge TTS انسٹال کریں۔' };
+}
 
 function downloadFile(urlStr, destPath) {
   return new Promise((resolve) => {
