@@ -110,7 +110,7 @@ export default function App() {
           </div>
           <div className="min-w-0">
             <h1 className="text-sm font-semibold text-white leading-tight">JARVIS Hybrid</h1>
-            <p className="text-[10px] text-slate-500">Business Agent v3.0.7</p>
+            <p className="text-[10px] text-slate-500">Business Agent v3.0.8</p>
           </div>
           {/* Settings button - moved to left side to avoid overlap with window controls */}
           <button
