@@ -1,0 +1,26 @@
+# JARVIS Hybrid - Desktop Dependencies (Minimal)
+# Basic automation without heavy voice/AI packages
+# Install: pip install -r requirements-minimal.txt
+
+# Core networking
+requests>=2.31.0
+websocket-client>=1.6.0
+
+# System Control
+pyautogui>=0.9.54
+psutil>=5.9.0
+pyperclip>=1.8.2
+pynput>=1.7.6
+
+# GUI
+customtkinter>=5.2.0
+
+# Image handling
+Pillow>=10.0.0
+
+# Browser automation
+playwright>=1.40.0
+
+# Windows-specific
+pywin32>=306; sys_platform == 'win32'
+win10toast>=0.9; sys_platform == 'win32'
