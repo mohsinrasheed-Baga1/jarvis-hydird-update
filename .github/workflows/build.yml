@@ -1,0 +1,39 @@
+name: Build & Release JARVIS Hybrid
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install desktop-app dependencies
+        working-directory: desktop-app
+        run: npm install
+
+      - name: Build React + Vite
+        working-directory: desktop-app
+        run: npx vite build
+
+      - name: Build & Publish Electron App
+        working-directory: desktop-app
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Tag push = publish release, main push = build only
+          if ("${{ github.ref }}" -match "refs/tags/v") {
+            npx electron-builder --win --x64 --publish always
+          } else {
+            npx electron-builder --win --x64 --publish never
+          }

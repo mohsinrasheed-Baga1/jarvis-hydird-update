@@ -52,21 +52,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showNotification: (title, body) => ipcRenderer.invoke('desktop-action', { type: 'notification', title, body }),
 
   // ─── Voice IPC — Direct STT & TTS through main process ───
-  // These bypass the renderer's fetch() calls which can fail in Electron
-  // Recording happens in the RENDERER (has proper mic access), transcription in MAIN process
-
   // Transcribe pre-recorded audio (base64) via Groq/OpenAI Whisper in main process
   transcribeAudioBase64: (base64Audio, language, apiKeys) => ipcRenderer.invoke('transcribe-audio-base64', base64Audio, language, apiKeys),
 
-  // Generate TTS audio via ElevenLabs / OpenAI / Sarvam in main process
+  // Generate TTS audio via ElevenLabs / OpenAI / Sarvam / Piper in main process
   generateTTS: (text, lang, emotion, apiKeys) => ipcRenderer.invoke('tts-generate', text, lang, emotion, apiKeys),
 
-  // Direct chat completion via Groq/Gemini/OpenAI (bypasses Next.js backend)
-  // This makes the app self-sufficient - chat works without backend running
-  chatCompletion: (message, conversationHistory, activeProvider, apiKeys) => ipcRenderer.invoke('chat-completion', message, conversationHistory, activeProvider, apiKeys),
+  // ElevenLabs voice discovery
+  getElevenLabsVoices: (apiKeys) => ipcRenderer.invoke('get-elevenlabs-voices', apiKeys),
 
-  // DEPRECATED: recordAndTranscribe removed - recording must happen in renderer context
-  // where navigator.mediaDevices is available. Use the renderer's MediaRecorder + transcribeAudioBase64 instead.
+  // Piper offline TTS
+  getPiperModelStatus: () => ipcRenderer.invoke('piper-model-status'),
+  downloadPiperModel: (lang) => ipcRenderer.invoke('download-piper-model', lang),
+  onPiperDownloadProgress: (cb) => { ipcRenderer.on('piper-download-progress', (_, d) => cb(d)); },
+
+  // Direct chat completion via Groq/Gemini/OpenAI (bypasses Next.js backend)
+  chatCompletion: (message, conversationHistory, activeProvider, apiKeys) => ipcRenderer.invoke('chat-completion', message, conversationHistory, activeProvider, apiKeys),
 
   // Dev tools
   toggleDevTools: () => ipcRenderer.invoke('toggle-devtools'),

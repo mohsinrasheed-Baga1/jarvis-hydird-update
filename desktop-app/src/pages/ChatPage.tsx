@@ -10,12 +10,18 @@ type LocalAutomationCommand = {
   localAction: { type: 'windows' | 'browser' | 'search'; action: string; params: Record<string, unknown> };
   desktopAction: Record<string, unknown>;
   confirmation: string;
+  requiresConfirmation?: boolean;
 };
+
+interface PendingConfirmation {
+  command: LocalAutomationCommand;
+  userMessage: string;
+}
 
 const welcomeMessage: StoredChatMessage = {
   id: 'welcome',
   role: 'assistant',
-  content: 'JARVIS Hybrid desktop is ready. Add an API key in Settings, choose a model, and start chatting.',
+  content: 'JARVIS Hybrid v3.0.1 ready. Add an API key in Settings, choose a model, and start chatting. Voice input and replies are supported.',
   timestamp: Date.now(),
 };
 
@@ -34,6 +40,7 @@ export default function ChatPage({ backend }: ChatPageProps) {
   const [automationStatus, setAutomationStatus] = useState('');
   const [automationConnected, setAutomationConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -387,6 +394,19 @@ export default function ChatPage({ backend }: ChatPageProps) {
       // ─── Step 1: Check for local automation commands ───
       const automation = !file ? detectLocalAutomation(messageText) : null;
       if (automation) {
+        // Check if this command requires user confirmation
+        // Volume/mute are safe, others need confirmation
+        const needsConfirmation = automation.requiresConfirmation !== false && 
+          !['volume-up', 'volume-down', 'mute-toggle'].includes(automation.desktopAction?.type as string);
+
+        if (needsConfirmation) {
+          // Show confirmation dialog instead of executing immediately
+          setPendingConfirmation({ command: automation, userMessage: messageText });
+          setIsLoading(false);
+          return;
+        }
+
+        // Safe commands (volume) execute immediately
         await executeAutomation(automation);
         const assistantMessage: StoredChatMessage = {
           id: `assistant_${Date.now()}`,
@@ -525,6 +545,47 @@ export default function ChatPage({ backend }: ChatPageProps) {
   const handleNewChat = () => {
     storageService.clearConversationHistory();
     setMessages([welcomeMessage]);
+    setPendingConfirmation(null);
+  };
+
+  const handleConfirmAutomation = async () => {
+    if (!pendingConfirmation) return;
+    const { command } = pendingConfirmation;
+    setPendingConfirmation(null);
+    setIsLoading(true);
+
+    try {
+      await executeAutomation(command);
+      const assistantMessage: StoredChatMessage = {
+        id: `assistant_${Date.now()}`,
+        role: 'assistant',
+        content: command.confirmation,
+        emotion: 'normal',
+        timestamp: Date.now(),
+      };
+      setMessages(prev => [...prev, assistantMessage]);
+      speakAssistantResponse(assistantMessage.content, 'normal');
+    } catch {
+      setMessages(prev => [...prev, {
+        id: `error_${Date.now()}`,
+        role: 'assistant',
+        content: 'کمانڈ چلانے میں مسئلہ آ گیا۔',
+        timestamp: Date.now(),
+      }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCancelConfirmation = () => {
+    const cancelMessage: StoredChatMessage = {
+      id: `assistant_${Date.now()}`,
+      role: 'assistant',
+      content: 'کمانڈ منسوخ کر دی گئی۔',
+      timestamp: Date.now(),
+    };
+    setMessages(prev => [...prev, cancelMessage]);
+    setPendingConfirmation(null);
   };
 
   return (
@@ -552,6 +613,40 @@ export default function ChatPage({ backend }: ChatPageProps) {
           <div className="rounded-lg border border-blue-500/20 bg-blue-500/10 px-4 py-3 text-sm text-blue-200">
             <div className="font-medium">Backend offline — using direct API mode</div>
             <div className="mt-1 text-blue-100/80">Chat, voice, and automation still work via direct API calls. File analysis needs the backend.</div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Dialog */}
+      {pendingConfirmation && (
+        <div className="mx-auto mt-4 max-w-5xl w-full px-6">
+          <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-5 py-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <svg className="w-5 h-5 text-yellow-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+              </svg>
+              <h3 className="text-yellow-200 font-medium text-sm">Confirmation Required</h3>
+            </div>
+            <p className="text-yellow-100/90 text-sm">
+              {pendingConfirmation.command.confirmation}
+            </p>
+            <p className="text-yellow-100/60 text-xs">
+              Command: {JSON.stringify(pendingConfirmation.command.desktopAction)}
+            </p>
+            <div className="flex items-center gap-3 pt-1">
+              <button
+                onClick={handleConfirmAutomation}
+                className="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white rounded-lg text-sm font-medium"
+              >
+                Yes, Execute
+              </button>
+              <button
+                onClick={handleCancelConfirmation}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-sm"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

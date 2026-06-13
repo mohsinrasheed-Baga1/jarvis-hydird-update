@@ -31,7 +31,7 @@ try {
 const CLOUD_APP_URL = 'http://127.0.0.1:3000';
 const VITE_DEV_URL = 'http://127.0.0.1:5173';
 const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '3.0.1';
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
 const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
 const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
@@ -846,17 +846,38 @@ ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur'
     const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
 
     if (!groqKey && !openaiKey) {
-      return { success: false, error: 'Groq or OpenAI API key required for voice transcription' };
+      return { success: false, error: 'Groq یا OpenAI API Key ضروری ہے۔ Settings میں جا کر API Key ڈالیں۔' };
     }
 
-    // Try Groq Whisper first (fastest, cheapest)
+    log('INFO', '[STT-IPC] Starting transcription, audio size:', audioBuffer.length, 'language:', language);
+
+    // Detect audio format from base64 header
+    let filename = 'voice.webm';
+    let contentType = 'audio/webm';
+    // Check if the original data was wav or mp3
+    if (audioBuffer.length > 4) {
+      const header = audioBuffer.slice(0, 4).toString('hex');
+      if (header.startsWith('52494646')) { // RIFF = WAV
+        filename = 'voice.wav';
+        contentType = 'audio/wav';
+      } else if (header.startsWith('ffd8ff') || header.startsWith('fffb') || header.startsWith('fff3')) { // MP3
+        filename = 'voice.mp3';
+        contentType = 'audio/mpeg';
+      }
+    }
+
+    // Map language codes to Whisper-compatible codes
+    const whisperLang = language === 'ur' ? 'ur' : language === 'en' ? 'en' : language || 'ur';
+
+    // Try Groq Whisper first (fastest, cheapest, best for Urdu)
     if (groqKey) {
       try {
         const boundary = '----JarvisSTT' + Date.now();
         const body = buildMultipart({
-          file: { data: audioBuffer, filename: 'voice.webm', contentType: 'audio/webm' },
+          file: { data: audioBuffer, filename, contentType },
           model: 'whisper-large-v3-turbo',
-          ...(language === 'ur' ? { language: 'ur' } : language === 'en' ? { language: 'en' } : {}),
+          language: whisperLang,
+          response_format: 'json',
         }, boundary);
 
         const result = await httpsPostBuffer('https://api.groq.com/openai/v1/audio/transcriptions', body, {
@@ -864,27 +885,35 @@ ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur'
           'Content-Type': `multipart/form-data; boundary=${boundary}`,
         });
 
+        log('INFO', '[STT-IPC] Groq response:', result.statusCode, 'size:', result.data.length);
+
         if (result.statusCode === 200) {
-          const json = JSON.parse(result.data.toString('utf8'));
-          if (json.text && json.text.trim()) {
-            log('INFO', '[STT-IPC] Groq Whisper success:', json.text.substring(0, 60));
-            return { success: true, text: json.text.trim(), method: 'groq-whisper-ipc' };
+          try {
+            const json = JSON.parse(result.data.toString('utf8'));
+            if (json.text && json.text.trim()) {
+              log('INFO', '[STT-IPC] Groq Whisper success:', json.text.substring(0, 80));
+              return { success: true, text: json.text.trim(), method: 'groq-whisper-ipc', language: json.language || whisperLang };
+            }
+          } catch (parseErr) {
+            log('WARN', '[STT-IPC] Groq JSON parse error:', parseErr.message);
           }
+        } else {
+          log('WARN', '[STT-IPC] Groq failed:', result.statusCode, result.data.toString('utf8').substring(0, 200));
         }
-        log('WARN', '[STT-IPC] Groq failed:', result.statusCode);
       } catch (err) {
         log('WARN', '[STT-IPC] Groq error:', err.message);
       }
     }
 
-    // Try OpenAI Whisper
+    // Try OpenAI Whisper (better quality, more expensive)
     if (openaiKey) {
       try {
         const boundary = '----JarvisSTT' + Date.now();
         const body = buildMultipart({
-          file: { data: audioBuffer, filename: 'voice.webm', contentType: 'audio/webm' },
+          file: { data: audioBuffer, filename, contentType },
           model: 'whisper-1',
-          ...(language === 'ur' ? { language: 'ur' } : language === 'en' ? { language: 'en' } : {}),
+          language: whisperLang,
+          response_format: 'verbose_json',
         }, boundary);
 
         const result = await httpsPostBuffer('https://api.openai.com/v1/audio/transcriptions', body, {
@@ -892,38 +921,249 @@ ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur'
           'Content-Type': `multipart/form-data; boundary=${boundary}`,
         });
 
+        log('INFO', '[STT-IPC] OpenAI response:', result.statusCode, 'size:', result.data.length);
+
         if (result.statusCode === 200) {
-          const json = JSON.parse(result.data.toString('utf8'));
-          if (json.text && json.text.trim()) {
-            log('INFO', '[STT-IPC] OpenAI Whisper success:', json.text.substring(0, 60));
-            return { success: true, text: json.text.trim(), method: 'openai-whisper-ipc' };
+          try {
+            const json = JSON.parse(result.data.toString('utf8'));
+            if (json.text && json.text.trim()) {
+              log('INFO', '[STT-IPC] OpenAI Whisper success:', json.text.substring(0, 80));
+              return { success: true, text: json.text.trim(), method: 'openai-whisper-ipc', language: json.language || whisperLang };
+            }
+          } catch (parseErr) {
+            log('WARN', '[STT-IPC] OpenAI JSON parse error:', parseErr.message);
           }
+        } else {
+          log('WARN', '[STT-IPC] OpenAI failed:', result.statusCode, result.data.toString('utf8').substring(0, 200));
         }
-        log('WARN', '[STT-IPC] OpenAI failed:', result.statusCode);
       } catch (err) {
         log('WARN', '[STT-IPC] OpenAI error:', err.message);
       }
     }
 
-    return { success: false, error: 'All transcription providers failed. Check API keys.' };
+    return { success: false, error: 'تمام ٹرانسکرپشن پرووائڈرز ناکام ہو گئے۔ API Keys چیک کریں۔' };
   } catch (err) {
     log('ERROR', '[STT-IPC] Error:', err.message);
     return { success: false, error: err.message };
   }
 });
 
-// IPC: Generate TTS audio via ElevenLabs / OpenAI / Sarvam
+// IPC: Generate TTS audio via ElevenLabs / OpenAI / Sarvam / Piper (offline)
+// ElevenLabs voice discovery cache
+let elevenlabsVoicesCache = null;
+let elevenlabsVoicesCacheTime = 0;
+const ELEVENLABS_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+async function discoverElevenLabsVoices(apiKey) {
+  // Use cache if fresh
+  if (elevenlabsVoicesCache && (Date.now() - elevenlabsVoicesCacheTime) < ELEVENLABS_CACHE_TTL) {
+    return elevenlabsVoicesCache;
+  }
+  try {
+    log('INFO', '[TTS-IPC] Discovering ElevenLabs voices...');
+    const result = await httpsGetBuffer('https://api.elevenlabs.io/v1/voices', {
+      'xi-api-key': apiKey,
+      'Accept': 'application/json',
+    });
+    if (result.statusCode === 200) {
+      const json = JSON.parse(result.data.toString('utf8'));
+      const voices = json.voices || [];
+      log('INFO', '[TTS-IPC] Found', voices.length, 'ElevenLabs voices');
+
+      // Categorize voices
+      const urduVoices = voices.filter(v =>
+        v.labels?.language?.toLowerCase().includes('urdu') ||
+        v.labels?.language?.toLowerCase().includes('hindi') ||
+        v.labels?.accent?.toLowerCase().includes('indian') ||
+        v.labels?.language?.toLowerCase().includes('ur') ||
+        v.name?.toLowerCase().includes('hindi') ||
+        v.name?.toLowerCase().includes('urdu')
+      );
+      const englishVoices = voices.filter(v =>
+        v.labels?.language?.toLowerCase().includes('english') ||
+        v.labels?.accent?.toLowerCase().includes('american') ||
+        v.labels?.accent?.toLowerCase().includes('british')
+      );
+      const clonedVoices = voices.filter(v => v.category === 'cloned');
+
+      const cache = { all: voices, urdu: urduVoices, english: englishVoices, cloned: clonedVoices };
+      elevenlabsVoicesCache = cache;
+      elevenlabsVoicesCacheTime = Date.now();
+      return cache;
+    }
+    log('WARN', '[TTS-IPC] Voice discovery failed:', result.statusCode);
+  } catch (err) {
+    log('WARN', '[TTS-IPC] Voice discovery error:', err.message);
+  }
+  return null;
+}
+
+function httpsGetBuffer(urlStr, headers) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(urlStr);
+    const mod = parsedUrl.protocol === 'http:' ? require('http') : require('https');
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (parsedUrl.protocol === 'http:' ? 80 : 443),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: 'GET',
+      headers: headers || {},
+    };
+    const req = mod.request(options, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        const data = Buffer.concat(chunks);
+        resolve({ statusCode: res.statusCode, headers: res.headers, data });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(15000, () => { req.destroy(new Error('Request timeout')); });
+    req.end();
+  });
+}
+
+// Piper TTS offline engine
+let piperProcess = null;
+const PIPER_MODELS_DIR = path.join(app.getPath('userData'), 'piper-models');
+
+async function ensurePiperModel(lang) {
+  try {
+    if (!fs.existsSync(PIPER_MODELS_DIR)) {
+      fs.mkdirSync(PIPER_MODELS_DIR, { recursive: true });
+    }
+
+    // Urdu model: Coqui TTS community Urdu model for Piper
+    const modelFile = lang === 'ur'
+      ? 'ur_PK-hsmm-medium.onnx'
+      : 'en_US-lessac-medium.onnx';
+    const modelConfig = modelFile.replace('.onnx', '.onnx.json');
+    const modelPath = path.join(PIPER_MODELS_DIR, modelFile);
+    const configPath = path.join(PIPER_MODELS_DIR, modelConfig);
+
+    if (fs.existsSync(modelPath) && fs.existsSync(configPath)) {
+      return { ready: true, modelPath, configPath };
+    }
+
+    log('INFO', '[Piper] Model not found, would need download:', modelFile);
+    return { ready: false, modelPath, configPath, needsDownload: true, modelFile, modelConfig };
+  } catch (err) {
+    log('WARN', '[Piper] Model check error:', err.message);
+    return { ready: false, error: err.message };
+  }
+}
+
+async function generatePiperTTS(text, lang) {
+  try {
+    const modelInfo = await ensurePiperModel(lang);
+    if (!modelInfo.ready) {
+      return { success: false, error: 'Piper model not downloaded. Go to Settings > Voice to download offline models.' };
+    }
+
+    // Try to find piper binary
+    const piperBin = process.platform === 'win32' ? 'piper.exe' : 'piper';
+    const localPiperPath = path.join(app.getPath('userData'), 'piper', piperBin);
+
+    let piperCmd = localPiperPath;
+    if (!fs.existsSync(piperCmd)) {
+      // Check if piper is in PATH
+      try {
+        const whichResult = await runCommand(process.platform === 'win32' ? 'where' : 'which', [piperBin]);
+        if (whichResult.success && whichResult.stdout.trim()) {
+          piperCmd = whichResult.stdout.trim().split('\n')[0].trim();
+        } else {
+          return { success: false, error: 'Piper TTS engine not installed. Install from Settings > Voice.' };
+        }
+      } catch {
+        return { success: false, error: 'Piper TTS engine not installed. Install from Settings > Voice.' };
+      }
+    }
+
+    const outputFile = path.join(app.getPath('temp'), `piper-tts-${Date.now()}.wav`);
+    const result = await runCommand(piperCmd, [
+      '--model', modelInfo.modelPath,
+      '--config', modelInfo.configPath,
+      '--output_file', outputFile,
+    ], {
+      input: text.substring(0, 2000),
+      timeout: 30000,
+    });
+
+    if (result.success || fs.existsSync(outputFile)) {
+      const audioBuffer = fs.readFileSync(outputFile);
+      try { fs.unlinkSync(outputFile); } catch {}
+      if (audioBuffer.length > 500) {
+        log('INFO', '[Piper] TTS success, size:', audioBuffer.length);
+        return { success: true, audioBase64: audioBuffer.toString('base64'), contentType: 'audio/wav', method: 'piper-offline' };
+      }
+    }
+    return { success: false, error: 'Piper TTS generation failed' };
+  } catch (err) {
+    log('WARN', '[Piper] Error:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
 ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', apiKeys = {}) => {
   try {
+    if (!text || !text.trim()) {
+      return { success: false, error: 'No text provided for TTS' };
+    }
+
     const elevenlabsKey = apiKeys.elevenlabs || process.env.ELEVENLABS_API_KEY || '';
     const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
     const sarvamKey = apiKeys.sarvam || process.env.SARVAM_API_KEY || '';
 
-    // Try ElevenLabs Turbo v2.5 first
+    log('INFO', '[TTS-IPC] Generating TTS, lang:', lang, 'emotion:', emotion, 'text length:', text.length);
+
+    // ─── Try ElevenLabs with dynamic voice discovery ───
     if (elevenlabsKey) {
       try {
-        const voiceIds = { ur: 'Xb7hH8MSUJpWjnnlVkGX', en: 'EXAVITQu4vr4xnSDxMaL' };
-        const voiceId = voiceIds[lang] || voiceIds.ur;
+        // Discover available voices
+        const voiceInfo = await discoverElevenLabsVoices(elevenlabsKey);
+
+        // Determine best voice for language
+        let voiceId = null;
+        let modelId = 'eleven_turbo_v2_5';
+
+        if (voiceInfo) {
+          // Priority: Cloned voice > Urdu/Hindi voice for Urdu > English voice for English > First available
+          if (lang === 'ur') {
+            if (voiceInfo.cloned?.length > 0) {
+              voiceId = voiceInfo.cloned[0].voice_id;
+              modelId = 'eleven_multilingual_v2';
+            } else if (voiceInfo.urdu?.length > 0) {
+              voiceId = voiceInfo.urdu[0].voice_id;
+              modelId = 'eleven_multilingual_v2';
+            }
+          } else {
+            if (voiceInfo.cloned?.length > 0) {
+              voiceId = voiceInfo.cloned[0].voice_id;
+            } else if (voiceInfo.english?.length > 0) {
+              voiceId = voiceInfo.english[0].voice_id;
+            }
+          }
+
+          // If no language-matched voice, try any voice with multilingual model
+          if (!voiceId && voiceInfo.all?.length > 0) {
+            voiceId = voiceInfo.all[0].voice_id;
+            modelId = 'eleven_multilingual_v2';
+          }
+        }
+
+        // Fallback to well-known default voices (available on all ElevenLabs accounts)
+        if (!voiceId) {
+          // Default ElevenLabs voices that work with all accounts
+          const defaultVoices = {
+            ur: '21m00Tcm4TlvDq8ikWAM', // Rachel - works well with multilingual
+            en: 'EXAVITQu4vr4xnSDxMaL', // Bella
+          };
+          voiceId = defaultVoices[lang] || defaultVoices.ur;
+          modelId = 'eleven_multilingual_v2';
+        }
+
+        log('INFO', '[TTS-IPC] ElevenLabs using voice:', voiceId, 'model:', modelId);
+
         const emotionSettings = {
           happy: { stability: 0.35, similarity: 0.75, style: 0.8 },
           serious: { stability: 0.55, similarity: 0.8, style: 0.4 },
@@ -935,7 +1175,7 @@ ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', 
         const settings = emotionSettings[emotion] || emotionSettings.normal;
         const bodyStr = JSON.stringify({
           text: text.substring(0, 5000),
-          model_id: 'eleven_turbo_v2_5',
+          model_id: modelId,
           voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, style: settings.style, use_speaker_boost: true },
           output_format: 'mp3_44100_128',
         });
@@ -951,12 +1191,31 @@ ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', 
           return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'elevenlabs-ipc' };
         }
         log('WARN', '[TTS-IPC] ElevenLabs failed:', result.statusCode, 'size:', result.data.length);
+
+        // If turbo v2.5 failed, try multilingual v2
+        if (modelId !== 'eleven_multilingual_v2') {
+          const bodyStr2 = JSON.stringify({
+            text: text.substring(0, 5000),
+            model_id: 'eleven_multilingual_v2',
+            voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, style: settings.style, use_speaker_boost: true },
+            output_format: 'mp3_44100_128',
+          });
+          const result2 = await httpsPostBuffer(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, Buffer.from(bodyStr2, 'utf8'), {
+            'Content-Type': 'application/json',
+            'xi-api-key': elevenlabsKey,
+            'Accept': 'audio/mpeg',
+          });
+          if (result2.statusCode === 200 && result2.data.length > 500) {
+            log('INFO', '[TTS-IPC] ElevenLabs multilingual v2 success, size:', result2.data.length);
+            return { success: true, audioBase64: result2.data.toString('base64'), contentType: 'audio/mpeg', method: 'elevenlabs-ipc' };
+          }
+        }
       } catch (err) {
         log('WARN', '[TTS-IPC] ElevenLabs error:', err.message);
       }
     }
 
-    // Try OpenAI TTS HD
+    // ─── Try OpenAI TTS HD ───
     if (openaiKey) {
       try {
         const bodyStr = JSON.stringify({
@@ -981,7 +1240,7 @@ ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', 
       }
     }
 
-    // Try Sarvam AI
+    // ─── Try Sarvam AI (good for Urdu/Hindi) ───
     if (sarvamKey) {
       try {
         const targetLang = lang === 'ur' ? 'hi-IN' : 'en';
@@ -1003,7 +1262,6 @@ ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', 
         });
 
         if (result.statusCode === 200) {
-          // Sarvam may return JSON with base64 audio
           try {
             const json = JSON.parse(result.data.toString('utf8'));
             if (json.audios && json.audios[0]) {
@@ -1014,7 +1272,6 @@ ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', 
               }
             }
           } catch {}
-          // Or direct audio
           if (result.data.length > 500) {
             log('INFO', '[TTS-IPC] Sarvam AI direct audio, size:', result.data.length);
             return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
@@ -1026,12 +1283,166 @@ ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', 
       }
     }
 
-    return { success: false, error: 'TTS providers unavailable. Set ElevenLabs, OpenAI, or Sarvam key in Settings.' };
+    // ─── Try Piper TTS (offline) ───
+    const piperResult = await generatePiperTTS(text, lang);
+    if (piperResult.success) return piperResult;
+
+    return { success: false, error: 'تمام آواز پرووائڈرز ناکام۔ Settings میں ElevenLabs یا OpenAI Key ڈالیں۔' };
   } catch (err) {
     log('ERROR', '[TTS-IPC] Error:', err.message);
     return { success: false, error: err.message };
   }
 });
+
+// IPC: Get ElevenLabs voice list
+ipcMain.handle('get-elevenlabs-voices', async (_, apiKeys = {}) => {
+  const elevenlabsKey = apiKeys.elevenlabs || process.env.ELEVENLABS_API_KEY || '';
+  if (!elevenlabsKey) return { success: false, voices: [], error: 'ElevenLabs API key not set' };
+  const voiceInfo = await discoverElevenLabsVoices(elevenlabsKey);
+  if (voiceInfo) {
+    return {
+      success: true,
+      voices: voiceInfo.all.map(v => ({
+        id: v.voice_id,
+        name: v.name,
+        category: v.category,
+        labels: v.labels,
+      })),
+      urduCount: voiceInfo.urdu.length,
+      englishCount: voiceInfo.english.length,
+      clonedCount: voiceInfo.cloned.length,
+    };
+  }
+  return { success: false, voices: [], error: 'Failed to fetch voices' };
+});
+
+// IPC: Piper model status and download
+ipcMain.handle('piper-model-status', async () => {
+  try {
+    const urModel = await ensurePiperModel('ur');
+    const enModel = await ensurePiperModel('en');
+    return {
+      success: true,
+      urdu: { ready: urModel.ready, modelPath: urModel.modelPath },
+      english: { ready: enModel.ready, modelPath: enModel.modelPath },
+      modelsDir: PIPER_MODELS_DIR,
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// IPC: Download Piper model
+ipcMain.handle('download-piper-model', async (_, lang) => {
+  try {
+    const modelInfo = await ensurePiperModel(lang);
+    if (modelInfo.ready) {
+      return { success: true, message: 'Model already downloaded' };
+    }
+
+    if (!fs.existsSync(PIPER_MODELS_DIR)) {
+      fs.mkdirSync(PIPER_MODELS_DIR, { recursive: true });
+    }
+
+    // Piper model URLs from the official HuggingFace repository
+    const modelUrls = {
+      ur: {
+        model: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/ur/ur_PK/hsmm/medium/ur_PK-hsmm-medium.onnx',
+        config: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/ur/ur_PK/hsmm/medium/ur_PK-hsmm-medium.onnx.json',
+        modelFile: 'ur_PK-hsmm-medium.onnx',
+        configFile: 'ur_PK-hsmm-medium.onnx.json',
+      },
+      en: {
+        model: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx',
+        config: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json',
+        modelFile: 'en_US-lessac-medium.onnx',
+        configFile: 'en_US-lessac-medium.onnx.json',
+      },
+    };
+
+    const urls = modelUrls[lang];
+    if (!urls) return { success: false, error: 'Unsupported language: ' + lang };
+
+    // Download model file
+    log('INFO', '[Piper] Downloading', lang, 'model...');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('piper-download-progress', { lang, status: 'downloading-model', percent: 0 });
+    }
+
+    const modelResult = await downloadFile(urls.model, path.join(PIPER_MODELS_DIR, urls.modelFile));
+    if (!modelResult.success) return { success: false, error: 'Model download failed: ' + modelResult.error };
+
+    // Download config file
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('piper-download-progress', { lang, status: 'downloading-config', percent: 80 });
+    }
+
+    const configResult = await downloadFile(urls.config, path.join(PIPER_MODELS_DIR, urls.configFile));
+    if (!configResult.success) return { success: false, error: 'Config download failed: ' + configResult.error };
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('piper-download-progress', { lang, status: 'complete', percent: 100 });
+    }
+
+    log('INFO', '[Piper]', lang, 'model downloaded successfully');
+    return { success: true, message: `${lang === 'ur' ? 'Urdu' : 'English'} model downloaded successfully` };
+  } catch (err) {
+    log('ERROR', '[Piper] Download error:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
+function downloadFile(urlStr, destPath) {
+  return new Promise((resolve) => {
+    try {
+      const parsedUrl = new URL(urlStr);
+      const mod = parsedUrl.protocol === 'http:' ? require('http') : require('https');
+
+      const followRedirect = (url, redirectCount = 0) => {
+        if (redirectCount > 5) {
+          resolve({ success: false, error: 'Too many redirects' });
+          return;
+        }
+        const pu = new URL(url);
+        const m = pu.protocol === 'http:' ? require('http') : require('https');
+        const opts = {
+          hostname: pu.hostname,
+          port: pu.port || (pu.protocol === 'http:' ? 80 : 443),
+          path: pu.pathname + pu.search,
+          method: 'GET',
+          headers: { 'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.1' },
+        };
+        const req = m.request(opts, (res) => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            followRedirect(res.headers.location, redirectCount + 1);
+            return;
+          }
+          if (res.statusCode !== 200) {
+            resolve({ success: false, error: `HTTP ${res.statusCode}` });
+            return;
+          }
+          const file = fs.createWriteStream(destPath);
+          res.pipe(file);
+          file.on('finish', () => {
+            file.close();
+            resolve({ success: true });
+          });
+          file.on('error', (err) => {
+            try { fs.unlinkSync(destPath); } catch {}
+            resolve({ success: false, error: err.message });
+          });
+        });
+        req.on('error', (err) => resolve({ success: false, error: err.message }));
+        req.setTimeout(120000, () => { req.destroy(new Error('Download timeout')); resolve({ success: false, error: 'Download timeout' }); });
+        req.end();
+      };
+
+      followRedirect(urlStr);
+    } catch (err) {
+      resolve({ success: false, error: err.message });
+    }
+  });
+}
 
 // ─── IPC: Direct Chat Completion (bypasses Next.js backend) ───
 // This makes the Electron app self-sufficient - chat works even without backend
