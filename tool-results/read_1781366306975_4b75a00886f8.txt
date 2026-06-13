@@ -1,0 +1,713 @@
+     1→import { useEffect, useRef, useState } from 'react';
+     2→import ChatMessage from '../components/ChatMessage';
+     3→import MessageInput from '../components/MessageInput';
+     4→import ModelSelector from '../components/ModelSelector';
+     5→import { apiClient, type BackendState } from '../services/apiClient';
+     6→import { storageService, type StoredChatMessage } from '../services/storageService';
+     7→
+     8→type Provider = 'groq' | 'gemini' | 'openai';
+     9→type LocalAutomationCommand = {
+    10→  localAction: { type: 'windows' | 'browser' | 'search'; action: string; params: Record<string, unknown> };
+    11→  desktopAction: Record<string, unknown>;
+    12→  confirmation: string;
+    13→  requiresConfirmation?: boolean;
+    14→};
+    15→
+    16→interface PendingConfirmation {
+    17→  command: LocalAutomationCommand;
+    18→  userMessage: string;
+    19→}
+    20→
+    21→const welcomeMessage: StoredChatMessage = {
+    22→  id: 'welcome',
+    23→  role: 'assistant',
+    24→  content: 'JARVIS Hybrid v3.0.1 ready. Add an API key in Settings, choose a model, and start chatting. Voice input and replies are supported.',
+    25→  timestamp: Date.now(),
+    26→};
+    27→
+    28→interface ChatPageProps {
+    29→  backend?: BackendState;
+    30→}
+    31→
+    32→export default function ChatPage({ backend }: ChatPageProps) {
+    33→  const [messages, setMessages] = useState<StoredChatMessage[]>(() => {
+    34→    const stored = storageService.getChatHistory();
+    35→    return stored.length > 0 ? stored : [welcomeMessage];
+    36→  });
+    37→  const [selectedModel, setSelectedModel] = useState<Provider>(() => storageService.getActiveProvider());
+    38→  const [voiceRepliesEnabled, setVoiceRepliesEnabled] = useState(() => storageService.getPreferences().voiceEnabled);
+    39→  const [speechStatus, setSpeechStatus] = useState('');
+    40→  const [automationStatus, setAutomationStatus] = useState('');
+    41→  const [automationConnected, setAutomationConnected] = useState(false);
+    42→  const [isLoading, setIsLoading] = useState(false);
+    43→  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
+    44→  const messagesEndRef = useRef<HTMLDivElement>(null);
+    45→  const audioRef = useRef<HTMLAudioElement | null>(null);
+    46→
+    47→  useEffect(() => {
+    48→    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    49→    storageService.setChatHistory(messages);
+    50→  }, [messages]);
+    51→
+    52→  useEffect(() => {
+    53→    let active = true;
+    54→    const refreshAutomationStatus = async () => {
+    55→      try {
+    56→        const status = await (window as any).electronAPI?.getStatus?.();
+    57→        if (active) setAutomationConnected(Boolean(status?.pythonReady));
+    58→      } catch {
+    59→        if (active) setAutomationConnected(false);
+    60→      }
+    61→    };
+    62→    refreshAutomationStatus();
+    63→    const timer = window.setInterval(refreshAutomationStatus, 5000);
+    64→    return () => {
+    65→      active = false;
+    66→      window.clearInterval(timer);
+    67→    };
+    68→  }, []);
+    69→
+    70→  const changeModel = (provider: Provider) => {
+    71→    setSelectedModel(provider);
+    72→    storageService.setActiveProvider(provider);
+    73→  };
+    74→
+    75→  const changeVoiceReplies = (enabled: boolean) => {
+    76→    setVoiceRepliesEnabled(enabled);
+    77→    storageService.setPreferences({ voiceEnabled: enabled });
+    78→    storageService.setAppState({ voiceEnabled: enabled });
+    79→    if (!enabled && 'speechSynthesis' in window) {
+    80→      window.speechSynthesis.cancel();
+    81→      setSpeechStatus('');
+    82→    }
+    83→  };
+    84→
+    85→  const chooseVoice = () => {
+    86→    const voices = window.speechSynthesis.getVoices();
+    87→    return voices.find(voice => voice.lang?.toLowerCase().startsWith('ur'))
+    88→      || voices.find(voice => ['hi-in', 'en-in'].includes(voice.lang?.toLowerCase()))
+    89→      || voices.find(voice => voice.lang?.toLowerCase().startsWith('en'))
+    90→      || voices[0];
+    91→  };
+    92→
+    93→  const fallbackSpeakAssistantResponse = (text: string) => {
+    94→    if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+    95→      setSpeechStatus('Voice unavailable');
+    96→      window.setTimeout(() => setSpeechStatus(''), 3500);
+    97→      return;
+    98→    }
+    99→
+   100→    const speak = () => {
+   101→      const utterance = new SpeechSynthesisUtterance(text);
+   102→      const voice = chooseVoice();
+   103→      if (voice) utterance.voice = voice;
+   104→      utterance.lang = voice?.lang || 'en-IN';
+   105→      utterance.rate = 0.95;
+   106→      utterance.pitch = 1;
+   107→      utterance.onstart = () => setSpeechStatus('Speaking with browser voice...');
+   108→      utterance.onend = () => setSpeechStatus('');
+   109→      utterance.onerror = () => {
+   110→        setSpeechStatus('Voice unavailable');
+   111→        window.setTimeout(() => setSpeechStatus(''), 3500);
+   112→      };
+   113→      window.speechSynthesis.cancel();
+   114→      window.speechSynthesis.speak(utterance);
+   115→    };
+   116→
+   117→    if (window.speechSynthesis.getVoices().length === 0) {
+   118→      window.speechSynthesis.onvoiceschanged = speak;
+   119→      window.setTimeout(speak, 500);
+   120→    } else {
+   121→      speak();
+   122→    }
+   123→  };
+   124→
+   125→  // Convert base64 audio to Blob URL (much more reliable than data URLs in Electron)
+   126→  const base64ToBlobUrl = (base64: string, contentType: string): string => {
+   127→    try {
+   128→      const binaryString = atob(base64);
+   129→      const bytes = new Uint8Array(binaryString.length);
+   130→      for (let i = 0; i < binaryString.length; i++) {
+   131→        bytes[i] = binaryString.charCodeAt(i);
+   132→      }
+   133→      const blob = new Blob([bytes], { type: contentType || 'audio/mpeg' });
+   134→      return URL.createObjectURL(blob);
+   135→    } catch {
+   136→      // Fallback to data URL if base64 conversion fails
+   137→      return `data:${contentType || 'audio/mpeg'};base64,${base64}`;
+   138→    }
+   139→  };
+   140→
+   141→  // Clean up previous audio Blob URL
+   142→  const cleanupAudioUrl = () => {
+   143→    if (audioRef.current?.src?.startsWith('blob:')) {
+   144→      URL.revokeObjectURL(audioRef.current.src);
+   145→    }
+   146→  };
+   147→
+   148→  const speakAssistantResponse = async (text: string, emotion: string = 'normal') => {
+   149→    if (!voiceRepliesEnabled || !text.trim()) return;
+   150→
+   151→    try {
+   152→      setSpeechStatus('Creating natural voice...');
+   153→      const prefs = storageService.getPreferences();
+   154→      const apiKeys = storageService.getApiKeys();
+   155→      const lang = prefs.language === 'en' ? 'en' : 'ur';
+   156→
+   157→      // In Electron: Try IPC-based TTS first (most reliable)
+   158→      const electronAPI = (window as any).electronAPI;
+   159→      if (electronAPI?.generateTTS) {
+   160→        try {
+   161→          const ttsResult = await electronAPI.generateTTS(text, lang, emotion, apiKeys);
+   162→          if (ttsResult.success && ttsResult.audioBase64) {
+   163→            // Use Blob URL instead of data URL — much more reliable in Electron
+   164→            const audioUrl = base64ToBlobUrl(ttsResult.audioBase64, ttsResult.contentType || 'audio/mpeg');
+   165→            cleanupAudioUrl();
+   166→            audioRef.current?.pause();
+   167→            audioRef.current = new Audio(audioUrl);
+   168→            audioRef.current.onplay = () => setSpeechStatus('Speaking...');
+   169→            audioRef.current.onended = () => { setSpeechStatus(''); cleanupAudioUrl(); };
+   170→            audioRef.current.onerror = () => {
+   171→              cleanupAudioUrl();
+   172→              // IPC TTS audio failed to play — fall back to browser voice
+   173→              console.warn('IPC TTS audio play failed, falling back to browser voice');
+   174→              fallbackSpeakAssistantResponse(text);
+   175→            };
+   176→            await audioRef.current.play();
+   177→            return;
+   178→          }
+   179→          // TTS provider returned failure — log and fall through
+   180→          console.warn('IPC TTS failed:', ttsResult.error || 'No audio generated');
+   181→        } catch (ipcErr) {
+   182→          console.warn('IPC TTS exception, trying backend:', ipcErr);
+   183→        }
+   184→      }
+   185→
+   186→      // Backend API TTS (requires Next.js backend running)
+   187→      try {
+   188→        const blob = await apiClient.textToSpeech(text, apiKeys, lang, emotion);
+   189→        const url = URL.createObjectURL(blob);
+   190→        cleanupAudioUrl();
+   191→        audioRef.current?.pause();
+   192→        audioRef.current = new Audio(url);
+   193→        audioRef.current.onplay = () => setSpeechStatus('Speaking...');
+   194→        audioRef.current.onended = () => { setSpeechStatus(''); URL.revokeObjectURL(url); };
+   195→        audioRef.current.onerror = () => {
+   196→          URL.revokeObjectURL(url);
+   197→          fallbackSpeakAssistantResponse(text);
+   198→        };
+   199→        await audioRef.current.play();
+   200→        return;
+   201→      } catch (backendErr) {
+   202→        console.warn('Backend TTS failed, using browser voice:', backendErr);
+   203→      }
+   204→
+   205→      // Final fallback: Browser speechSynthesis
+   206→      fallbackSpeakAssistantResponse(text);
+   207→    } catch {
+   208→      fallbackSpeakAssistantResponse(text);
+   209→    }
+   210→  };
+   211→
+   212→  // Parse [ACTION:json] blocks from AI response text
+   213→  const parseActionFromResponse = (text: string): { cleanText: string; actions: Record<string, unknown>[] } => {
+   214→    const actions: Record<string, unknown>[] = [];
+   215→    const actionRegex = /\[ACTION:(\{[^}]+\})\]/g;
+   216→    let match;
+   217→    let cleanText = text;
+   218→
+   219→    while ((match = actionRegex.exec(text)) !== null) {
+   220→      try {
+   221→        const actionJson = JSON.parse(match[1]);
+   222→        actions.push(actionJson);
+   223→      } catch {
+   224→        // Skip malformed action blocks
+   225→      }
+   226→    }
+   227→
+   228→    // Remove action blocks from display text
+   229→    cleanText = text.replace(actionRegex, '').trim();
+   230→
+   231→    return { cleanText, actions };
+   232→  };
+   233→
+   234→  // Execute parsed actions via Electron IPC
+   235→  const executeParsedActions = async (actions: Record<string, unknown>[]): Promise<boolean> => {
+   236→    let allSuccess = true;
+   237→    for (const action of actions) {
+   238→      try {
+   239→        const electronResult = await (window as any).electronAPI?.desktopAction?.(action);
+   240→        if (!electronResult?.success) {
+   241→          allSuccess = false;
+   242→        }
+   243→      } catch {
+   244→        allSuccess = false;
+   245→      }
+   246→    }
+   247→    return allSuccess;
+   248→  };
+   249→
+   250→  const detectLocalAutomation = (raw: string): LocalAutomationCommand | null => {
+   251→    const text = raw.toLowerCase().trim();
+   252→    const normalized = text.replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ');
+   253→
+   254→    if (/(volume|awaz|awaaz|آواز|والیوم).*(up|increase|زیادہ|اوپر|بڑھا)|^(volume up|increase volume)$/i.test(normalized)) {
+   255→      return {
+   256→        localAction: { type: 'windows', action: 'volume_up', params: { steps: 5 } },
+   257→        desktopAction: { type: 'volume-up', steps: 5 },
+   258→        confirmation: 'ہو گیا! والیوم بڑھا دیا 🔊',
+   259→      };
+   260→    }
+   261→    if (/(volume|awaz|awaaz|آواز|والیوم).*(down|decrease|کم|نیچے)|^(volume down|decrease volume)$/i.test(normalized)) {
+   262→      return {
+   263→        localAction: { type: 'windows', action: 'volume_down', params: { steps: 5 } },
+   264→        desktopAction: { type: 'volume-down', steps: 5 },
+   265→        confirmation: 'ہو گیا! والیوم کم کر دیا 🔉',
+   266→      };
+   267→    }
+   268→    if (/\b(mute|unmute)\b|میوٹ/i.test(normalized)) {
+   269→      return {
+   270→        localAction: { type: 'windows', action: 'mute_toggle', params: {} },
+   271→        desktopAction: { type: 'mute-toggle' },
+   272→        confirmation: normalized.includes('unmute') ? 'ہو گیا! آواز آن کر دی 🔊' : 'ہو گیا! میوٹ کر دیا 🔇',
+   273→      };
+   274→    }
+   275→    if (/(take|capture).*(screenshot)|سکرین شاٹ|screenshot/i.test(normalized)) {
+   276→      return {
+   277→        localAction: { type: 'windows', action: 'screenshot', params: {} },
+   278→        desktopAction: { type: 'screenshot' },
+   279→        confirmation: 'ہو گیا! سکرین شاٹ لی 📸',
+   280→      };
+   281→    }
+   282→
+   283→    // YouTube with search query — most common automation request
+   284→    // Matches: "یوٹیوب پر تلاوت لگاؤ", "YouTube pe tilawat", "یوٹیوب پر نعت", "یوٹیوب پر گانا"
+   285→    const ytSearchMatch = normalized.match(/یوٹیوب\s*پر\s*(.+?)(?:\s*لگاؤ|\s*چلاؤ|\s*لگا|\s*چلا|\s*play|\s*چلائیں|\s*لگائیں|$)/)
+   286→      || normalized.match(/youtube\s*(?:pe|par|on)\s*(.+?)(?:\s*play|\s*open|\s*search|$)/i)
+   287→      || normalized.match(/(?:play|چلاؤ|لگاؤ)\s*(.+?)\s*(?:یوٹیوب|youtube)/i);
+   288→    if (ytSearchMatch) {
+   289→      const query = (ytSearchMatch[1] || '').trim();
+   290→      return {
+   291→        localAction: { type: 'search', action: 'youtube', params: { query } },
+   292→        desktopAction: { type: 'open-youtube', query },
+   293→        confirmation: query ? `یوٹیوب پر "${query}" لگا رہا ہوں! 🎬` : 'یوٹیوب کھول رہا ہوں! 🎬',
+   294→      };
+   295→    }
+   296→
+   297→    // Just open YouTube without search
+   298→    if (/\bopen\s+youtube\b|یوٹیوب.*(کھول|open)/i.test(normalized)) {
+   299→      return {
+   300→        localAction: { type: 'search', action: 'youtube', params: { query: '' } },
+   301→        desktopAction: { type: 'open-youtube', query: '' },
+   302→        confirmation: 'یوٹیوب کھول رہا ہوں! 🎬',
+   303→      };
+   304→    }
+   305→
+   306→    // Audio/Music/Islamic content — redirect to YouTube search
+   307→    if (/اذان\s*لگاؤ|adan|azan|اذان/i.test(normalized)) {
+   308→      return {
+   309→        localAction: { type: 'search', action: 'youtube', params: { query: 'adan azan call to prayer' } },
+   310→        desktopAction: { type: 'open-youtube', query: 'adan azan call to prayer' },
+   311→        confirmation: 'اذان لگا رہا ہوں! 🕌',
+   312→      };
+   313→    }
+   314→    if (/تلاوت|tilawat|قرآن\s*چلاؤ|quran\s*play/i.test(normalized)) {
+   315→      return {
+   316→        localAction: { type: 'search', action: 'youtube', params: { query: 'quran tilawat' } },
+   317→        desktopAction: { type: 'open-youtube', query: 'quran tilawat' },
+   318→        confirmation: 'تلاوت چلا رہا ہوں! 📖',
+   319→      };
+   320→    }
+   321→    if (/نعت|naat|نعت\s*لگاؤ/i.test(normalized)) {
+   322→      return {
+   323→        localAction: { type: 'search', action: 'youtube', params: { query: 'naat sharif' } },
+   324→        desktopAction: { type: 'open-youtube', query: 'naat sharif' },
+   325→        confirmation: 'نعت لگا رہا ہوں! 🌹',
+   326→      };
+   327→    }
+   328→    if (/گانا|song|music|موسیقی/i.test(normalized) && /چلاؤ|لگاؤ|play|بجاؤ/i.test(normalized)) {
+   329→      return {
+   330→        localAction: { type: 'search', action: 'youtube', params: { query: 'songs music' } },
+   331→        desktopAction: { type: 'open-youtube', query: 'songs music' },
+   332→        confirmation: 'گانا چلا رہا ہوں! 🎵',
+   333→      };
+   334→    }
+   335→
+   336→    const appMatch = normalized.match(/\bopen\s+(notepad|chrome|calculator|calc|paint|cmd|powershell)\b/)
+   337→      || normalized.match(/(notepad|chrome|calculator|calc|paint|cmd|powershell)\s*(کھولو|کھول|chalao|open|chalao)/i);
+   338→    if (appMatch) {
+   339→      const app = appMatch[1] === 'calc' ? 'calculator' : appMatch[1];
+   340→      const label = app === 'chrome' ? 'Chrome' : app.charAt(0).toUpperCase() + app.slice(1);
+   341→      return {
+   342→        localAction: { type: 'windows', action: 'open_app', params: { name: app } },
+   343→        desktopAction: { type: 'open-app', app },
+   344→        confirmation: `ہو گیا! ${label} کھل گیا ✅`,
+   345→      };
+   346→    }
+   347→
+   348→    // Open any URL
+   349→    const urlMatch = normalized.match(/(https?:\/\/[^\s]+)/i);
+   350→    if (urlMatch) {
+   351→      return {
+   352→        localAction: { type: 'browser', action: 'open_url', params: { url: urlMatch[1] } },
+   353→        desktopAction: { type: 'open-url', url: urlMatch[1] },
+   354→        confirmation: 'ویب سائٹ کھول رہا ہوں! 🌐',
+   355→      };
+   356→    }
+   357→
+   358→    const googleMatch = normalized.match(/\bsearch\s+google(?:\s+for)?\s*(.*)$/) || normalized.match(/\bgoogle\s+search\s*(.*)$/)
+   359→      || normalized.match(/گوگل\s*(?:پر\s*)?search|گوگل\s*(?:سے\s*)?ڈھونڈو/i);
+   360→    if (googleMatch) {
+   361→      const query = (googleMatch[1] || '').trim();
+   362→      return {
+   363→        localAction: { type: 'search', action: query ? 'google' : 'open_url', params: query ? { query } : { url: 'https://www.google.com' } },
+   364→        desktopAction: query ? { type: 'search-google', query } : { type: 'open-url', url: 'https://www.google.com' },
+   365→        confirmation: query ? `گوگل پر "${query}" سرچ کر رہا ہوں! 🔍` : 'گوگل کھول رہا ہوں! 🔍',
+   366→      };
+   367→    }
+   368→    if (/\bopen\s+google\b|گوگل.*(کھول|open)/i.test(normalized)) {
+   369→      return {
+   370→        localAction: { type: 'browser', action: 'open_url', params: { url: 'https://www.google.com' } },
+   371→        desktopAction: { type: 'open-url', url: 'https://www.google.com' },
+   372→        confirmation: 'گوگل کھول رہا ہوں! 🔍',
+   373→      };
+   374→    }
+   375→    return null;
+   376→  };
+   377→
+   378→  const waitForTaskResult = async (taskId: string, userId: string) => {
+   379→    for (let i = 0; i < 12; i++) {
+   380→      await new Promise(resolve => window.setTimeout(resolve, 500));
+   381→      const result = await apiClient.getTaskResult(userId, taskId).catch(() => null);
+   382→      if (result?.completed) return result.result;
+   383→    }
+   384→    return null;
+   385→  };
+   386→
+   387→  const executeAutomation = async (command: LocalAutomationCommand) => {
+   388→    const userId = storageService.getAppState().userId;
+   389→    setAutomationStatus('Automation running...');
+   390→    try {
+   391→      if (backend?.connected && automationConnected) {
+   392→        const queued = await apiClient.queueLocalAction(userId, command.localAction);
+   393→        const result = queued?.taskId ? await waitForTaskResult(queued.taskId, userId) : null;
+   394→        if (result?.success) return result;
+   395→      }
+   396→      const electronResult = await (window as any).electronAPI?.desktopAction?.(command.desktopAction);
+   397→      if (electronResult?.success) return electronResult;
+   398→      throw new Error(electronResult?.message || electronResult?.error || 'Automation did not complete');
+   399→    } finally {
+   400→      window.setTimeout(() => setAutomationStatus(automationConnected ? 'Automation Connected' : 'Automation Offline'), 1200);
+   401→    }
+   402→  };
+   403→
+   404→  const handleSendMessage = async (text: string, file?: File | null) => {
+   405→    const messageText = text.trim();
+   406→    const displayText = file
+   407→      ? `${messageText || 'Please analyze this file.'}\n\nAttached: ${file.name}`
+   408→      : messageText;
+   409→
+   410→    const userMessage: StoredChatMessage = {
+   411→      id: `user_${Date.now()}`,
+   412→      role: 'user',
+   413→      content: displayText,
+   414→      timestamp: Date.now(),
+   415→    };
+   416→
+   417→    setMessages(prev => [...prev, userMessage]);
+   418→    setIsLoading(true);
+   419→
+   420→    try {
+   421→      // ─── Step 1: Check for local automation commands ───
+   422→      const automation = !file ? detectLocalAutomation(messageText) : null;
+   423→      if (automation) {
+   424→        // Check if this command requires user confirmation
+   425→        // Volume/mute are safe, others need confirmation
+   426→        const needsConfirmation = automation.requiresConfirmation !== false && 
+   427→          !['volume-up', 'volume-down', 'mute-toggle'].includes(automation.desktopAction?.type as string);
+   428→
+   429→        if (needsConfirmation) {
+   430→          // Show confirmation dialog instead of executing immediately
+   431→          setPendingConfirmation({ command: automation, userMessage: messageText });
+   432→          setIsLoading(false);
+   433→          return;
+   434→        }
+   435→
+   436→        // Safe commands (volume) execute immediately
+   437→        await executeAutomation(automation);
+   438→        const assistantMessage: StoredChatMessage = {
+   439→          id: `assistant_${Date.now()}`,
+   440→          role: 'assistant',
+   441→          content: automation.confirmation,
+   442→          emotion: 'normal',
+   443→          timestamp: Date.now(),
+   444→        };
+   445→        setMessages(prev => [...prev, assistantMessage]);
+   446→        speakAssistantResponse(assistantMessage.content, 'normal');
+   447→        return;
+   448→      }
+   449→
+   450→      const userId = storageService.getAppState().userId;
+   451→      const apiKeys = storageService.getApiKeys();
+   452→      const electronAPI = (window as any).electronAPI;
+   453→      const isElectron = !!electronAPI?.chatCompletion;
+   454→
+   455→      // ─── Step 2: Try IPC-based chat first (works without backend!) ───
+   456→      if (isElectron && !file) {
+   457→        try {
+   458→          // Build conversation history from current messages
+   459→          const chatHistory = messages
+   460→            .filter(m => m.id !== 'welcome')
+   461→            .slice(-10)
+   462→            .map(m => ({ role: m.role, content: m.content }));
+   463→
+   464→          const ipcResult = await electronAPI.chatCompletion(
+   465→            messageText,
+   466→            chatHistory,
+   467→            selectedModel,
+   468→            apiKeys,
+   469→          );
+   470→
+   471→          if (ipcResult.success && ipcResult.message) {
+   472→            // Parse [ACTION:json] blocks and execute them
+   473→            let displayMessage = ipcResult.message;
+   474→            const { cleanText, actions } = parseActionFromResponse(displayMessage);
+   475→            if (actions.length > 0) {
+   476→              displayMessage = cleanText;
+   477→              setAutomationStatus('Executing action...');
+   478→              try {
+   479→                await executeParsedActions(actions);
+   480→                setAutomationStatus('Action completed ✅');
+   481→              } catch {
+   482→                setAutomationStatus('Action failed');
+   483→              }
+   484→              window.setTimeout(() => setAutomationStatus(automationConnected ? 'Automation Connected' : 'Automation Offline'), 3000);
+   485→            }
+   486→
+   487→            const assistantMessage: StoredChatMessage = {
+   488→              id: `assistant_${Date.now()}`,
+   489→              role: 'assistant',
+   490→              content: displayMessage,
+   491→              emotion: ipcResult.emotion,
+   492→              timestamp: Date.now(),
+   493→            };
+   494→            setMessages(prev => [...prev, assistantMessage]);
+   495→            speakAssistantResponse(assistantMessage.content, ipcResult.emotion);
+   496→            return;
+   497→          }
+   498→          // IPC chat failed - fall through to backend API
+   499→        } catch (ipcErr) {
+   500→          console.warn('IPC chat failed, trying backend:', ipcErr);
+   501→        }
+   502→      }
+   503→
+   504→      // ─── Step 3: Fall back to backend API chat ───
+   505→      const response = file
+   506→        ? await apiClient.uploadFile(
+   507→            userId,
+   508→            file,
+   509→            apiKeys,
+   510→            messageText || 'Please analyze this file.',
+   511→            selectedModel,
+   512→          )
+   513→        : await apiClient.sendMessage({
+   514→            message: messageText,
+   515→            userId,
+   516→            stream: false,
+   517→            activeProvider: selectedModel,
+   518→            apiKeys,
+   519→          });
+   520→
+   521→      if (response.requiresLocalAction && response.localAction) {
+   522→        // Execute local action directly via Electron IPC (most reliable)
+   523→        try {
+   524→          const electronResult = await (window as any).electronAPI?.desktopAction?.(response.localAction);
+   525→          if (electronResult?.success) {
+   526→            // Action executed successfully, modify message to confirm
+   527→            response.message = response.message || 'Action executed!';
+   528→          }
+   529→        } catch {
+   530→          // Fallback: queue via API
+   531→          await apiClient.queueLocalAction(storageService.getAppState().userId, response.localAction).catch(() => undefined);
+   532→        }
+   533→      }
+   534→
+   535→      // Parse [ACTION:json] blocks from AI response and execute them
+   536→      let displayMessage = response.message || 'No response returned.';
+   537→      const { cleanText, actions } = parseActionFromResponse(displayMessage);
+   538→      if (actions.length > 0) {
+   539→        displayMessage = cleanText;
+   540→        // Execute all parsed actions via Electron IPC
+   541→        setAutomationStatus('Executing action...');
+   542→        try {
+   543→          await executeParsedActions(actions);
+   544→          setAutomationStatus('Action completed ✅');
+   545→        } catch {
+   546→          setAutomationStatus('Action failed');
+   547→        }
+   548→        window.setTimeout(() => setAutomationStatus(automationConnected ? 'Automation Connected' : 'Automation Offline'), 3000);
+   549→      }
+   550→
+   551→      const assistantMessage: StoredChatMessage = {
+   552→        id: `assistant_${Date.now()}`,
+   553→        role: 'assistant',
+   554→        content: displayMessage,
+   555→        emotion: response.emotion,
+   556→        timestamp: Date.now(),
+   557→      };
+   558→      setMessages(prev => [...prev, assistantMessage]);
+   559→      speakAssistantResponse(assistantMessage.content, response.emotion);
+   560→    } catch (error) {
+   561→      setMessages(prev => [...prev, {
+   562→        id: `error_${Date.now()}`,
+   563→        role: 'assistant',
+   564→        content: error instanceof Error ? error.message : 'Could not reach the local backend.',
+   565→        timestamp: Date.now(),
+   566→      }]);
+   567→    } finally {
+   568→      setIsLoading(false);
+   569→    }
+   570→  };
+   571→
+   572→  const handleNewChat = () => {
+   573→    storageService.clearConversationHistory();
+   574→    setMessages([welcomeMessage]);
+   575→    setPendingConfirmation(null);
+   576→  };
+   577→
+   578→  const handleConfirmAutomation = async () => {
+   579→    if (!pendingConfirmation) return;
+   580→    const { command } = pendingConfirmation;
+   581→    setPendingConfirmation(null);
+   582→    setIsLoading(true);
+   583→
+   584→    try {
+   585→      await executeAutomation(command);
+   586→      const assistantMessage: StoredChatMessage = {
+   587→        id: `assistant_${Date.now()}`,
+   588→        role: 'assistant',
+   589→        content: command.confirmation,
+   590→        emotion: 'normal',
+   591→        timestamp: Date.now(),
+   592→      };
+   593→      setMessages(prev => [...prev, assistantMessage]);
+   594→      speakAssistantResponse(assistantMessage.content, 'normal');
+   595→    } catch {
+   596→      setMessages(prev => [...prev, {
+   597→        id: `error_${Date.now()}`,
+   598→        role: 'assistant',
+   599→        content: 'کمانڈ چلانے میں مسئلہ آ گیا۔',
+   600→        timestamp: Date.now(),
+   601→      }]);
+   602→    } finally {
+   603→      setIsLoading(false);
+   604→    }
+   605→  };
+   606→
+   607→  const handleCancelConfirmation = () => {
+   608→    const cancelMessage: StoredChatMessage = {
+   609→      id: `assistant_${Date.now()}`,
+   610→      role: 'assistant',
+   611→      content: 'کمانڈ منسوخ کر دی گئی۔',
+   612→      timestamp: Date.now(),
+   613→    };
+   614→    setMessages(prev => [...prev, cancelMessage]);
+   615→    setPendingConfirmation(null);
+   616→  };
+   617→
+   618→  return (
+   619→    <div className="flex flex-col h-full bg-slate-950">
+   620→      <div className="bg-slate-950/70 border-b border-slate-800">
+   621→        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+   622→          <div>
+   623→            <h1 className="text-xl font-semibold text-white">AI Chat</h1>
+   624→            <p className="text-xs text-slate-500">Local desktop assistant with cloud model routing</p>
+   625→          </div>
+   626→          <div className="flex items-center gap-3">
+   627→            <ModelSelector value={selectedModel} onChange={changeModel} />
+   628→            <button
+   629→              onClick={handleNewChat}
+   630→              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-sm font-medium"
+   631→            >
+   632→              New chat
+   633→            </button>
+   634→          </div>
+   635→        </div>
+   636→      </div>
+   637→
+   638→      {!backend?.connected && (
+   639→        <div className="mx-auto mt-4 max-w-5xl w-full px-6">
+   640→          <div className="rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-sm text-cyan-200">
+   641→            <div className="font-medium">Direct API Mode — Chat & voice working ✅</div>
+   642→            <div className="mt-1 text-cyan-100/80">You're using direct API calls. Set API keys in Settings for full functionality.</div>
+   643→          </div>
+   644→        </div>
+   645→      )}
+   646→
+   647→      {/* Confirmation Dialog — Modal Overlay for high visibility */}
+   648→      {pendingConfirmation && (
+   649→        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={(e) => { if (e.target === e.currentTarget) handleCancelConfirmation(); }}>
+   650→          <div className="mx-4 w-full max-w-lg rounded-2xl border border-yellow-500/40 bg-slate-900/95 shadow-2xl shadow-yellow-500/10 px-6 py-6 space-y-4 animate-in">
+   651→            <div className="flex items-center gap-3">
+   652→              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-yellow-500/20">
+   653→                <svg className="w-6 h-6 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+   654→                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+   655→                </svg>
+   656→              </div>
+   657→              <div>
+   658→                <h3 className="text-yellow-200 font-bold text-lg">تصدیق ضروری ہے</h3>
+   659→                <p className="text-yellow-100/60 text-xs">Confirmation Required</p>
+   660→              </div>
+   661→            </div>
+   662→            <div className="bg-yellow-500/10 rounded-lg px-4 py-3">
+   663→              <p className="text-yellow-100 text-base font-medium">
+   664→                {pendingConfirmation.command.confirmation}
+   665→              </p>
+   666→            </div>
+   667→            <p className="text-slate-500 text-xs">
+   668→              کمانڈ: {JSON.stringify(pendingConfirmation.command.desktopAction)}
+   669→            </p>
+   670→            <div className="flex items-center gap-3 pt-2">
+   671→              <button
+   672→                onClick={handleConfirmAutomation}
+   673→                className="flex-1 px-5 py-3 bg-yellow-600 hover:bg-yellow-500 text-white rounded-xl text-sm font-bold transition-all hover:scale-[1.02] active:scale-95"
+   674→              >
+   675→                ✅ ہاں، چلاؤ
+   676→              </button>
+   677→              <button
+   678→                onClick={handleCancelConfirmation}
+   679→                className="flex-1 px-5 py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-sm font-medium transition-all hover:scale-[1.02] active:scale-95"
+   680→              >
+   681→                ❌ منسوخ
+   682→              </button>
+   683→            </div>
+   684→          </div>
+   685→        </div>
+   686→      )}
+   687→
+   688→      <div className="flex-1 overflow-y-auto max-w-5xl mx-auto w-full px-6 py-8 space-y-6">
+   689→        {messages.map(msg => <ChatMessage key={msg.id} message={msg} />)}
+   690→        {isLoading && (
+   691→          <div className="bg-slate-800 rounded-lg p-4 text-slate-400 text-sm w-fit">
+   692→            Thinking...
+   693→          </div>
+   694→        )}
+   695→        <div ref={messagesEndRef} />
+   696→      </div>
+   697→
+   698→      <div className="bg-slate-950/85 border-t border-slate-800">
+   699→        <div className="max-w-5xl mx-auto px-6 py-5">
+   700→          <MessageInput
+   701→            onSendMessage={handleSendMessage}
+   702→            isLoading={isLoading}
+   703→            voiceRepliesEnabled={voiceRepliesEnabled}
+   704→            onVoiceRepliesChange={changeVoiceReplies}
+   705→            speechStatus={speechStatus}
+   706→            automationStatus={automationStatus || (automationConnected ? 'Automation Connected' : 'Automation Offline')}
+   707→          />
+   708→        </div>
+   709→      </div>
+   710→    </div>
+   711→  );
+   712→}
+   713→

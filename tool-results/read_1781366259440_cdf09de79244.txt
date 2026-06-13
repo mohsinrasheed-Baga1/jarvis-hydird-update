@@ -1,0 +1,1986 @@
+     1→const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, dialog, shell, net, session } = require('electron');
+     2→const path = require('path');
+     3→const fs = require('fs');
+     4→const { exec, spawn } = require('child_process');
+     5→
+     6→// ─── Load .env file for API keys ───
+     7→// This allows users to set GROQ_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY etc. in a .env file
+     8→try {
+     9→  const envPaths = [
+    10→    path.join(__dirname, '..', '.env'),
+    11→    path.join(__dirname, '..', '..', '.env'),
+    12→    path.join(process.cwd(), '.env'),
+    13→  ];
+    14→  for (const envPath of envPaths) {
+    15→    if (fs.existsSync(envPath)) {
+    16→      const envContent = fs.readFileSync(envPath, 'utf8');
+    17→      for (const line of envContent.split('\n')) {
+    18→        const trimmed = line.trim();
+    19→        if (!trimmed || trimmed.startsWith('#')) continue;
+    20→        const match = trimmed.match(/^([A-Z_]+)=(.*)$/);
+    21→        if (match && !process.env[match[1]]) {
+    22→          process.env[match[1]] = match[2].replace(/^["']|["']$/g, '');
+    23→        }
+    24→      }
+    25→      break;
+    26→    }
+    27→  }
+    28→} catch {}
+    29→
+    30→// ─── Configuration ───
+    31→const CLOUD_APP_URL = 'http://127.0.0.1:3000';
+    32→const VITE_DEV_URL = 'http://127.0.0.1:5173';
+    33→const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
+    34→const APP_VERSION = '3.0.4';
+    35→const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
+    36→const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
+    37→const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
+    38→
+    39→function isPipeClosedError(err) {
+    40→  return err && (err.code === 'EPIPE' || String(err.message || '').includes('EPIPE'));
+    41→}
+    42→
+    43→function ignoreClosedPipe(err) {
+    44→  if (!isPipeClosedError(err)) {
+    45→    try { fs.appendFileSync(path.join(app.getPath('userData'), 'jarvis-main.log'), `[pipe-error] ${err.message || err}\n`); } catch {}
+    46→  }
+    47→}
+    48→
+    49→try { process.stdout?.on?.('error', ignoreClosedPipe); } catch {}
+    50→try { process.stderr?.on?.('error', ignoreClosedPipe); } catch {}
+    51→
+    52→// ─── Subprocess Management ───
+    53→let cloudProcess = null;
+    54→let pythonProcess = null;
+    55→let cloudReady = false;
+    56→let pythonReady = false;
+    57→let cloudError = '';
+    58→let pythonError = '';
+    59→const MAX_STARTUP_WAIT = 30000; // 30 seconds
+    60→
+    61→function runCommand(command, args = [], options = {}) {
+    62→  return new Promise((resolve) => {
+    63→    const child = spawn(command, args, { shell: false, windowsHide: true, ...options });
+    64→    let stdout = '';
+    65→    let stderr = '';
+    66→    child.stdout?.on('data', data => { stdout += data.toString(); });
+    67→    child.stderr?.on('data', data => { stderr += data.toString(); });
+    68→    child.on('error', err => resolve({ success: false, error: err.message, stdout, stderr }));
+    69→    child.on('close', code => resolve({ success: code === 0, code, stdout, stderr, error: code === 0 ? '' : (stderr || `Exit code ${code}`) }));
+    70→  });
+    71→}
+    72→
+    73→function ps(script) {
+    74→  return runCommand('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeout: 15000 });
+    75→}
+    76→
+    77→function sendVolumeKey(keyCode, count = 1) {
+    78→  const safeCount = Math.max(1, Math.min(20, Number(count) || 1));
+    79→  return ps(`$wsh = New-Object -ComObject WScript.Shell; 1..${safeCount} | ForEach-Object { $wsh.SendKeys([char]${keyCode}); Start-Sleep -Milliseconds 35 }`);
+    80→}
+    81→
+    82→function normalizeAppName(name = '') {
+    83→  const value = String(name).toLowerCase().trim();
+    84→  const apps = {
+    85→    notepad: 'notepad.exe',
+    86→    chrome: 'chrome.exe',
+    87→    calculator: 'calc.exe',
+    88→    calc: 'calc.exe',
+    89→    paint: 'mspaint.exe',
+    90→    wordpad: 'write.exe',
+    91→    cmd: 'cmd.exe',
+    92→    powershell: 'powershell.exe',
+    93→  };
+    94→  return apps[value] || name;
+    95→}
+    96→
+    97→async function executeDesktopAction(action = {}) {
+    98→  const type = action.type || action.action;
+    99→  if (type === 'open-url' || type === 'open_url') {
+   100→    await shell.openExternal(action.url);
+   101→    return { success: true, message: 'Opened URL' };
+   102→  }
+   103→  if (type === 'search-google' || type === 'google_search') {
+   104→    await shell.openExternal('https://www.google.com/search?q=' + encodeURIComponent(action.query || ''));
+   105→    return { success: true, message: 'Google search opened' };
+   106→  }
+   107→  if (type === 'open-youtube' || type === 'play-youtube' || type === 'search-youtube' || type === 'youtube_search') {
+   108→    const query = action.query || '';
+   109→    const url = query
+   110→      ? 'https://www.youtube.com/results?search_query=' + encodeURIComponent(query)
+   111→      : 'https://www.youtube.com';
+   112→    await shell.openExternal(url);
+   113→    return { success: true, message: query ? 'YouTube search opened' : 'YouTube opened' };
+   114→  }
+   115→  if (type === 'open-app' || type === 'open_app') {
+   116→    exec(process.platform === 'win32' ? `start "" "${normalizeAppName(action.app || action.name)}"` : `open -a "${action.app || action.name}"`);
+   117→    return { success: true, message: `Opened ${action.app || action.name}` };
+   118→  }
+   119→  if (type === 'play-audio' || type === 'play_audio') {
+   120→    // Open audio URL in default browser/player
+   121→    const audioUrl = action.url || '';
+   122→    if (audioUrl) {
+   123→      await shell.openExternal(audioUrl);
+   124→      return { success: true, message: 'Audio opened' };
+   125→    }
+   126→    // If no URL but has query, search on YouTube
+   127→    if (action.query) {
+   128→      const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(action.query);
+   129→      await shell.openExternal(url);
+   130→      return { success: true, message: 'Audio search opened on YouTube' };
+   131→    }
+   132→    return { success: false, message: 'No audio URL or query provided' };
+   133→  }
+   134→  if (type === 'open-whatsapp' || type === 'whatsapp') {
+   135→    const phone = action.phone || action.number || '';
+   136→    const message = action.message || action.text || '';
+   137→    const url = phone
+   138→      ? `https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}${message ? '&text=' + encodeURIComponent(message) : ''}`
+   139→      : 'https://web.whatsapp.com';
+   140→    await shell.openExternal(url);
+   141→    return { success: true, message: phone ? 'WhatsApp chat opened' : 'WhatsApp Web opened' };
+   142→  }
+   143→  if (type === 'volume-up' || type === 'volume_up') {
+   144→    if (process.platform === 'win32') return { ...(await sendVolumeKey(175, action.steps || 5)), message: 'Volume increased' };
+   145→  }
+   146→  if (type === 'volume-down' || type === 'volume_down') {
+   147→    if (process.platform === 'win32') return { ...(await sendVolumeKey(174, action.steps || 5)), message: 'Volume decreased' };
+   148→  }
+   149→  if (type === 'mute-toggle' || type === 'mute_toggle' || type === 'mute' || type === 'unmute') {
+   150→    if (process.platform === 'win32') return { ...(await sendVolumeKey(173, 1)), message: 'Mute toggled' };
+   151→  }
+   152→  if (type === 'screenshot') {
+   153→    const file = action.path || path.join(app.getPath('pictures'), `jarvis-screenshot-${Date.now()}.png`);
+   154→    const escaped = file.replace(/'/g, "''");
+   155→    const result = await ps(`Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $bmp.Save('${escaped}', [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose(); Write-Output '${escaped}'`);
+   156→    return { success: result.success, message: `Screenshot saved: ${file}`, path: file, error: result.error };
+   157→  }
+   158→  if (type === 'system-command') {
+   159→    const allowed = new Set(['lock']);
+   160→    if (!allowed.has(action.command)) return { success: false, message: 'Command not allowed from UI' };
+   161→    if (process.platform === 'win32') exec('rundll32.exe user32.dll,LockWorkStation');
+   162→    return { success: true, message: 'Command sent' };
+   163→  }
+   164→  return { success: false, message: 'Unknown desktop action' };
+   165→}
+   166→
+   167→async function listenWithWindowsSpeech(language = 'en-US') {
+   168→  if (process.platform !== 'win32') {
+   169→    return { success: false, error: 'Windows Speech API is only available on Windows' };
+   170→  }
+   171→  const culture = String(language).startsWith('ur') ? 'ur-PK' : 'en-US';
+   172→  const script = `
+   173→Add-Type -AssemblyName System.Speech
+   174→$culture = New-Object System.Globalization.CultureInfo('${culture}')
+   175→$recognizer = New-Object System.Speech.Recognition.SpeechRecognitionEngine($culture)
+   176→$recognizer.SetInputToDefaultAudioDevice()
+   177→$dictation = New-Object System.Speech.Recognition.DictationGrammar
+   178→$recognizer.LoadGrammar($dictation)
+   179→$result = $recognizer.Recognize([TimeSpan]::FromSeconds(8))
+   180→if ($result -and $result.Text) { Write-Output $result.Text }
+   181→$recognizer.Dispose()
+   182→`;
+   183→  const result = await ps(script);
+   184→  const text = (result.stdout || '').trim();
+   185→  return text ? { success: true, text, method: 'windows-speech' } : { success: false, error: result.error || 'No speech recognized' };
+   186→}
+   187→
+   188→// ─── Logging Setup ───
+   189→const logDir = path.join(app.getPath('userData'), 'logs');
+   190→try { fs.mkdirSync(logDir, { recursive: true }); } catch {}
+   191→const logFile = path.join(logDir, 'jarvis-main.log');
+   192→function writeConsoleLog(level, args) {
+   193→  try {
+   194→    fs.appendFileSync(logFile, `[console:${level}] ${args.map(formatLogArg).join(' ')}\n`);
+   195→  } catch {}
+   196→}
+   197→
+   198→console.log = (...args) => writeConsoleLog('log', args);
+   199→console.warn = (...args) => writeConsoleLog('warn', args);
+   200→console.error = (...args) => writeConsoleLog('error', args);
+   201→
+   202→function formatLogArg(arg) {
+   203→  if (typeof arg === 'string') return arg;
+   204→  if (arg instanceof Error) return arg.stack || arg.message;
+   205→  try { return JSON.stringify(arg); } catch { return String(arg); }
+   206→}
+   207→
+   208→function safeConsole(method, message) {
+   209→  writeConsoleLog(method, [message]);
+   210→}
+   211→
+   212→function log(level, ...args) {
+   213→  const ts = new Date().toISOString();
+   214→  const msg = `[${ts}] [${level}] ${args.map(formatLogArg).join(' ')}\n`;
+   215→  try { fs.appendFileSync(logFile, msg); } catch {}
+   216→  safeConsole(level === 'ERROR' ? 'error' : level === 'WARN' ? 'warn' : 'log', msg.trimEnd());
+   217→}
+   218→
+   219→process.on('uncaughtException', (err) => {
+   220→  if (isPipeClosedError(err)) {
+   221→    log('WARN', 'Ignored closed pipe from detached launcher');
+   222→    return;
+   223→  }
+   224→  log('ERROR', 'Uncaught exception:', err);
+   225→  try { dialog.showErrorBox('JARVIS Error', err.message || String(err)); } catch {}
+   226→});
+   227→
+   228→function attachProcessLogging(child, name, onStdout, onStderr) {
+   229→  const attach = (stream, level, handler) => {
+   230→    if (!stream || stream.destroyed || stream.readableEnded) return;
+   231→    stream.on('data', (data) => {
+   232→      try {
+   233→        handler(data.toString());
+   234→      } catch (err) {
+   235→        if (!isPipeClosedError(err)) log('WARN', `[${name}] Stream handler failed:`, err.message);
+   236→      }
+   237→    });
+   238→    stream.on('error', (err) => {
+   239→      if (!isPipeClosedError(err)) log(level, `[${name}] Stream error:`, err.message);
+   240→    });
+   241→  };
+   242→  attach(child?.stdout, 'WARN', onStdout);
+   243→  attach(child?.stderr, 'WARN', onStderr);
+   244→}
+   245→log('INFO', '═══════════════════════════════════════');
+   246→log('INFO', 'JARVIS Hybrid Desktop v' + APP_VERSION + ' starting...');
+   247→log('INFO', 'Platform:', process.platform, 'Arch:', process.arch);
+   248→
+   249→// ─── Path Resolution ───
+   250→function getProjectRoot() {
+   251→  // In development: electron/main.js is inside desktop-app/
+   252→  // In production: we're inside resources/app.asar
+   253→  const devRoot = path.join(__dirname, '..', '..');
+   254→  const prodRoot = path.join(process.resourcesPath, 'app');
+   255→
+   256→  if (fs.existsSync(path.join(devRoot, 'package.json'))) {
+   257→    return devRoot;
+   258→  }
+   259→  return prodRoot;
+   260→}
+   261→
+   262→function getPythonPath() {
+   263→  const root = getProjectRoot();
+   264→  const venvPython = path.join(root, '.venv', 'Scripts', 'python.exe');
+   265→  const systemPython = 'python';
+   266→
+   267→  if (fs.existsSync(venvPython)) {
+   268→    return venvPython;
+   269→  }
+   270→  return systemPython;
+   271→}
+   272→
+   273→// ─── Subprocess Launchers ───
+   274→async function launchCloudBackend() {
+   275→  return new Promise(async (resolve, reject) => {
+   276→    log('INFO', '[Launcher] Starting cloud backend...');
+   277→
+   278→    const root = getProjectRoot();
+   279→    const isWindows = process.platform === 'win32';
+   280→
+   281→    // Check if npm is available
+   282→    const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+   283→
+   284→    try {
+   285→      if (await checkCloudHealth()) {
+   286→        cloudReady = true;
+   287→        cloudError = '';
+   288→        log('INFO', '[Launcher] Existing cloud backend detected');
+   289→        resolve(true);
+   290→        return;
+   291→      }
+   292→
+   293→      cloudProcess = spawn(npmCmd, ['run', 'dev', '--', '--hostname', '127.0.0.1', '--port', '3000'], {
+   294→        cwd: root,
+   295→        shell: true,
+   296→        stdio: ['ignore', 'pipe', 'pipe'],
+   297→      });
+   298→
+   299→      attachProcessLogging(cloudProcess, 'Cloud', (output) => {
+   300→        log('INFO', '[Cloud]', output.trim());
+   301→
+   302→        // Check for ready signal
+   303→        if (output.includes('ready') || output.includes('started server') || output.includes('Local:')) {
+   304→          waitForCloud().then((ready) => {
+   305→            cloudReady = ready;
+   306→            cloudError = ready ? '' : 'Next.js started, but /api/health did not answer on http://127.0.0.1:3000';
+   307→            log(ready ? 'INFO' : 'WARN', '[Launcher]', ready ? 'Cloud backend ready' : cloudError);
+   308→            resolve(ready);
+   309→          });
+   310→        }
+   311→      }, (output) => {
+   312→        output = output.trim();
+   313→        if (output) cloudError = output.split(/\r?\n/).slice(-1)[0];
+   314→        log('WARN', '[Cloud]', output);
+   315→      });
+   316→
+   317→      cloudProcess.on('error', (err) => {
+   318→        cloudError = err.message;
+   319→        log('ERROR', '[Cloud] Process error:', err.message);
+   320→        reject(err);
+   321→      });
+   322→
+   323→      cloudProcess.on('close', (code) => {
+   324→        log('INFO', '[Cloud] Process exited with code:', code);
+   325→        cloudReady = false;
+   326→        if (code !== 0 && code !== null) cloudError = `Next.js process exited with code ${code}`;
+   327→      });
+   328→
+   329→      // Timeout fallback
+   330→      setTimeout(() => {
+   331→        if (!cloudReady) {
+   332→          cloudError = cloudError || 'Next.js startup timed out on http://127.0.0.1:3000';
+   333→          log('WARN', '[Launcher]', cloudError);
+   334→          resolve(false);
+   335→        }
+   336→      }, MAX_STARTUP_WAIT);
+   337→
+   338→    } catch (err) {
+   339→      cloudError = err.message;
+   340→      log('ERROR', '[Launcher] Failed to start cloud:', err.message);
+   341→      reject(err);
+   342→    }
+   343→  });
+   344→}
+   345→
+   346→async function launchPythonAgent() {
+   347→  return new Promise((resolve, reject) => {
+   348→    log('INFO', '[Launcher] Starting Python desktop agent...');
+   349→
+   350→    const root = getProjectRoot();
+   351→    const pythonPath = getPythonPath();
+   352→    const desktopPath = path.join(root, 'desktop');
+   353→
+   354→    try {
+   355→      const args = [
+   356→        '-m', 'jarvis.main',
+   357→        '--cloud-url', CLOUD_APP_URL,
+   358→        '--no-voice',
+   359→        '--background',
+   360→      ];
+   361→
+   362→      pythonProcess = spawn(pythonPath, args, {
+   363→        cwd: desktopPath,
+   364→        shell: true,
+   365→        stdio: ['ignore', 'pipe', 'pipe'],
+   366→      });
+   367→
+   368→      attachProcessLogging(pythonProcess, 'Python', (output) => {
+   369→        log('INFO', '[Python]', output.trim());
+   370→
+   371→        // Check for ready signal
+   372→        if (output.includes('Ready') || output.includes('started') || output.includes('Online')) {
+   373→          pythonReady = true;
+   374→          log('INFO', '[Launcher] ✅ Python agent ready');
+   375→          resolve(true);
+   376→        }
+   377→      }, (output) => {
+   378→        output = output.trim();
+   379→        if (output) pythonError = output.split(/\r?\n/).slice(-1)[0];
+   380→        log('WARN', '[Python]', output);
+   381→      });
+   382→
+   383→      pythonProcess.on('error', (err) => {
+   384→        pythonError = err.message;
+   385→        log('ERROR', '[Python] Process error:', err.message);
+   386→        reject(err);
+   387→      });
+   388→
+   389→      pythonProcess.on('close', (code) => {
+   390→        log('INFO', '[Python] Process exited with code:', code);
+   391→        pythonReady = false;
+   392→        if (code !== 0 && code !== null) pythonError = `Python agent exited with code ${code}`;
+   393→      });
+   394→
+   395→      // Timeout fallback
+   396→      setTimeout(() => {
+   397→        if (!pythonReady) {
+   398→          pythonError = pythonError || 'Python agent startup timed out';
+   399→          log('WARN', '[Launcher]', pythonError);
+   400→          resolve(false);
+   401→        }
+   402→      }, MAX_STARTUP_WAIT);
+   403→
+   404→    } catch (err) {
+   405→      pythonError = err.message;
+   406→      log('ERROR', '[Launcher] Failed to start Python:', err.message);
+   407→      reject(err);
+   408→    }
+   409→  });
+   410→}
+   411→
+   412→async function checkCloudHealth() {
+   413→  return new Promise((resolve) => {
+   414→  const request = net.request(CLOUD_APP_URL + '/api/health');
+   415→    request.on('response', (response) => {
+   416→      resolve(response.statusCode === 200);
+   417→    });
+   418→    request.on('error', () => resolve(false));
+   419→    request.end();
+   420→  });
+   421→}
+   422→
+   423→async function waitForCloud() {
+   424→  log('INFO', '[Launcher] Waiting for cloud to be ready...');
+   425→
+   426→  const maxAttempts = 30;
+   427→  for (let i = 0; i < maxAttempts; i++) {
+   428→    const healthy = await checkCloudHealth();
+   429→    if (healthy) {
+   430→      log('INFO', '[Launcher] ✅ Cloud health check passed');
+   431→      return true;
+   432→    }
+   433→    await new Promise(r => setTimeout(r, 1000));
+   434→  }
+   435→
+   436→  log('WARN', '[Launcher] Cloud health check timed out');
+   437→  return false;
+   438→}
+   439→
+   440→function cleanupProcesses() {
+   441→  log('INFO', '[Launcher] Cleaning up subprocesses...');
+   442→
+   443→  if (cloudProcess) {
+   444→    try {
+   445→      cloudProcess.kill();
+   446→      log('INFO', '[Launcher] Cloud process killed');
+   447→    } catch (err) {
+   448→      log('WARN', '[Launcher] Failed to kill cloud:', err.message);
+   449→    }
+   450→  }
+   451→
+   452→  if (pythonProcess) {
+   453→    try {
+   454→      pythonProcess.kill();
+   455→      log('INFO', '[Launcher] Python process killed');
+   456→    } catch (err) {
+   457→      log('WARN', '[Launcher] Failed to kill Python:', err.message);
+   458→    }
+   459→  }
+   460→}
+   461→
+   462→// ─── Auto-Updater ───
+   463→let autoUpdater = null;
+   464→try {
+   465→  const { autoUpdater: au } = require('electron-updater');
+   466→  autoUpdater = au;
+   467→  autoUpdater.autoDownload = true;
+   468→  autoUpdater.autoInstallOnAppQuit = true;
+   469→  autoUpdater.logger = {
+   470→    info: (...a) => log('INFO', '[Updater]', ...a),
+   471→    error: (...a) => log('ERROR', '[Updater]', ...a),
+   472→    warn: (...a) => log('WARN', '[Updater]', ...a),
+   473→  };
+   474→  log('INFO', 'electron-updater loaded');
+   475→} catch (err) {
+   476→  log('WARN', 'electron-updater not available:', err.message);
+   477→}
+   478→
+   479→// ─── State ───
+   480→let mainWindow = null;
+   481→let tray = null;
+   482→let isQuitting = false;
+   483→let trayCreated = false;
+   484→let loadFailed = false;
+   485→let lastWebVersion = null;
+   486→let updateDownloaded = false;
+   487→
+   488→// ─── Icon Path Resolution ───
+   489→function getIconPath() {
+   490→  const candidates = [
+   491→    path.join(process.resourcesPath, 'app.asar', 'assets', 'icon.png'),
+   492→    path.join(__dirname, '..', 'assets', 'icon.png'),
+   493→    path.join(__dirname, 'assets', 'icon.png'),
+   494→    path.join(process.resourcesPath, 'assets', 'icon.png'),
+   495→  ];
+   496→  for (const p of candidates) {
+   497→    try { if (fs.existsSync(p)) { log('INFO', 'Icon found:', p); return p; } } catch {}
+   498→  }
+   499→  log('WARN', 'No icon.png found');
+   500→  return undefined;
+   501→}
+   502→
+   503→function isOnline() { return net.isOnline(); }
+   504→
+   505→async function clearBrowserCache() {
+   506→  try {
+   507→    if (mainWindow && !mainWindow.isDestroyed()) {
+   508→      const ses = mainWindow.webContents.session;
+   509→      await ses.clearCache();
+   510→      await ses.clearStorageData({ storages: ['cache', 'serviceworker', 'shadercache'] });
+   511→      log('INFO', 'Browser cache cleared');
+   512→    }
+   513→  } catch (err) { log('WARN', 'Failed to clear cache:', err.message); }
+   514→}
+   515→
+   516→// ─── Create Window ───
+   517→function createWindow() {
+   518→  log('INFO', 'Creating main window...');
+   519→  const iconPath = getIconPath();
+   520→  const windowOptions = {
+   521→    width: 1400, height: 900, minWidth: 1000, minHeight: 700,
+   522→    backgroundColor: '#0a0a0f', show: false,
+   523→    webPreferences: {
+   524→      nodeIntegration: false,
+   525→      contextIsolation: true,
+   526→      preload: path.join(__dirname, 'preload.js'),
+   527→      sandbox: false,
+   528→      webSecurity: true,
+   529→      partition: 'persist:jarvis',
+   530→    },
+   531→  };
+   532→  if (iconPath) windowOptions.icon = iconPath;
+   533→
+   534→  if (process.platform === 'win32') {
+   535→    try {
+   536→      const winVer = parseFloat(require('os').release());
+   537→      if (winVer >= 10) {
+   538→        windowOptions.frame = true;
+   539→        windowOptions.titleBarStyle = 'hidden';
+   540→        windowOptions.titleBarOverlay = { color: '#0a0a0f', symbolColor: '#a29bfe', height: 36 };
+   541→      } else { windowOptions.frame = false; }
+   542→    } catch { windowOptions.frame = false; }
+   543→  } else if (process.platform === 'darwin') {
+   544→    windowOptions.titleBarStyle = 'hiddenInset'; windowOptions.frame = true;
+   545→  } else { windowOptions.frame = false; }
+   546→
+   547→  try { mainWindow = new BrowserWindow(windowOptions); } catch (err) {
+   548→    log('ERROR', 'Failed to create BrowserWindow:', err.message);
+   549→    try {
+   550→      mainWindow = new BrowserWindow({ width: 1200, height: 800, show: false,
+   551→        webPreferences: { nodeIntegration: false, contextIsolation: true, preload: path.join(__dirname, 'preload.js') } });
+   552→    } catch (err2) { dialog.showErrorBox('JARVIS Error', 'Could not create window: ' + err2.message); app.quit(); return; }
+   553→  }
+   554→
+   555→  // Grant microphone permission
+   556→  mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
+   557→    const allowed = ['media', 'clipboard-read', 'clipboard-write', 'display-capture'];
+   558→    callback(allowed.includes(permission));
+   559→  });
+   560→  mainWindow.webContents.session.setPermissionCheckHandler((webContents, permission) => {
+   561→    return ['media', 'clipboard-read', 'clipboard-write', 'display-capture'].includes(permission);
+   562→  });
+   563→
+   564→  loadWebApp();
+   565→
+   566→  mainWindow.once('ready-to-show', () => { mainWindow.show(); mainWindow.focus(); });
+   567→  setTimeout(() => { if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) { mainWindow.show(); mainWindow.focus(); } }, 5000);
+   568→
+   569→  mainWindow.webContents.on('did-finish-load', () => {
+   570→    log('INFO', 'Page loaded successfully');
+   571→    loadFailed = false;
+   572→    mainWindow.webContents.executeJavaScript(`
+   573→      if (window.electronAPI) {
+   574→        window.__JARVIS_DESKTOP__ = true;
+   575→        window.__JARVIS_VERSION__ = '${APP_VERSION}';
+   576→        window.__JARVIS_PLATFORM__ = '${process.platform}';
+   577→      }
+   578→    `).catch(() => {});
+   579→  });
+   580→  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDesc) => {
+   581→    log('ERROR', 'Failed to load:', errorCode, errorDesc);
+   582→    loadFailed = true;
+   583→    showOfflinePage(errorDesc);
+   584→  });
+   585→  mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+   586→
+   587→  mainWindow.webContents.on('before-input-event', (event, input) => {
+   588→    if (input.control && input.shift && input.key.toLowerCase() === 'r') { event.preventDefault(); hardRefresh(); }
+   589→    if (input.control && input.shift && input.key.toLowerCase() === 'd') { event.preventDefault(); mainWindow.webContents.toggleDevTools(); }
+   590→    if (input.control && input.shift && input.key.toLowerCase() === 'u') { event.preventDefault(); checkForUpdates(); }
+   591→  });
+   592→
+   593→  mainWindow.on('close', (e) => {
+   594→    if (!isQuitting) { e.preventDefault(); if (trayCreated) mainWindow.hide(); else mainWindow.minimize(); }
+   595→  });
+   596→  mainWindow.on('closed', () => { mainWindow = null; });
+   597→}
+   598→
+   599→function loadWebApp() {
+   600→  if (!mainWindow || mainWindow.isDestroyed()) return;
+   601→
+   602→  const appUrl = app.isPackaged || LOAD_DIST_UI
+   603→    ? 'file://' + path.join(__dirname, '..', 'dist', 'index.html')
+   604→    : VITE_DEV_URL;
+   605→  log('INFO', 'Loading UI:', appUrl);
+   606→
+   607→  if (app.isPackaged || isOnline()) {
+   608→    mainWindow.loadURL(appUrl, {
+   609→      userAgent: 'JARVIS-Hybrid-Desktop/' + APP_VERSION + ' (' + process.platform + ')',
+   610→      extraHeaders: 'Cache-Control: no-cache\nPragma: no-cache\n',
+   611→    }).catch(err => {
+   612→      log('ERROR', 'Failed to load modern UI:', err.message);
+   613→      if (isOnline()) {
+   614→        mainWindow.loadURL(REMOTE_FALLBACK_URL).catch(() => showOfflinePage('Connection failed'));
+   615→      } else {
+   616→        showOfflinePage('Connection failed');
+   617→      }
+   618→    });
+   619→  } else { showOfflinePage('No internet connection'); }
+   620→}
+   621→
+   622→async function hardRefresh() {
+   623→  await clearBrowserCache();
+   624→  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reloadIgnoringCache();
+   625→}
+   626→
+   627→function showOfflinePage(reason) {
+   628→  if (!mainWindow || mainWindow.isDestroyed()) return;
+   629→  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>JARVIS - Offline</title>
+   630→  <style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0a0a0f;color:#e2e8f0;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh}
+   631→  .c{text-align:center;max-width:500px;padding:40px}.logo{width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,#6c5ce7,#00cec9);display:flex;align-items:center;justify-content:center;margin:0 auto 24px;font-size:36px;box-shadow:0 0 30px rgba(108,92,231,0.4)}
+   632→  h1{font-size:28px;margin-bottom:12px;color:#a29bfe}p{color:#8a8a9a;font-size:16px;margin-bottom:24px}
+   633→  .btn{background:linear-gradient(135deg,#6c5ce7,#a29bfe);color:#fff;border:none;padding:14px 32px;border-radius:12px;font-size:16px;cursor:pointer;font-weight:600}
+   634→  .btn:hover{transform:translateY(-2px)}</style></head>
+   635→  <body><div class="c"><div class="logo">🤖</div><h1>JARVIS Hybrid</h1>
+   636→  <p>انٹرنیٹ کنکشن نہیں ملا</p>${reason ? '<p style="color:#ff6b6b;font-size:13px">' + reason + '</p>' : ''}
+   637→  <button class="btn" onclick="window.electronAPI?.retryLoad()">🔄 دوبارہ کوشش</button>
+   638→  <p style="margin-top:20px;font-size:12px;color:#555">JARVIS Hybrid Desktop v${APP_VERSION}</p></div></body></html>`;
+   639→  mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html)).catch(() => {});
+   640→}
+   641→
+   642→function createTray() {
+   643→  try {
+   644→    const iconPath = getIconPath();
+   645→    if (!iconPath) { log('WARN', 'No icon for tray'); return; }
+   646→    tray = new Tray(iconPath);
+   647→    trayCreated = true;
+   648→    tray.setContextMenu(Menu.buildFromTemplate([
+   649→      { label: 'JARVIS v' + APP_VERSION, enabled: false },
+   650→      { type: 'separator' },
+   651→      { label: 'Open', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } else createWindow(); } },
+   652→      { label: 'Hard Refresh', click: () => hardRefresh() },
+   653→      { type: 'separator' },
+   654→      { label: 'Check Updates', click: () => checkForUpdates() },
+   655→      { type: 'separator' },
+   656→      { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
+   657→    ]));
+   658→    tray.setToolTip('JARVIS Hybrid v' + APP_VERSION);
+   659→    tray.on('double-click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } else createWindow(); });
+   660→  } catch (err) { log('WARN', 'Failed to create tray:', err.message); trayCreated = false; }
+   661→}
+   662→
+   663→// ─── Auto-Update ───
+   664→function checkForUpdates() {
+   665→  if (!app.isPackaged) {
+   666→    log('INFO', 'Skipping update check (dev mode)');
+   667→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'dev-mode' });
+   668→    return;
+   669→  }
+   670→  if (!autoUpdater) {
+   671→    log('WARN', 'Auto-updater not available');
+   672→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'not-available' });
+   673→    return;
+   674→  }
+   675→  log('INFO', 'Checking for updates...');
+   676→  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'checking' });
+   677→  autoUpdater.checkForUpdates().catch(err => {
+   678→    log('ERROR', 'Update check failed:', err.message);
+   679→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'error', message: err.message });
+   680→  });
+   681→}
+   682→
+   683→if (autoUpdater) {
+   684→  autoUpdater.on('update-available', (info) => {
+   685→    log('INFO', 'Update available:', info.version);
+   686→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'available', version: info.version });
+   687→  });
+   688→  autoUpdater.on('download-progress', (p) => {
+   689→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'downloading', percent: Math.round(p.percent), speed: Math.round(p.bytesPerSecond / 1024) + ' KB/s' });
+   690→  });
+   691→  autoUpdater.on('update-downloaded', (info) => {
+   692→    log('INFO', 'Update downloaded:', info.version);
+   693→    updateDownloaded = true;
+   694→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'downloaded', version: info.version });
+   695→    try {
+   696→      if (Notification.isSupported()) {
+   697→        const n = new Notification({ title: 'JARVIS Update Ready', body: `v${info.version} downloaded. Restart to install.`, icon: getIconPath() });
+   698→        n.show(); n.on('click', () => { isQuitting = true; autoUpdater.quitAndInstall(false, true); });
+   699→      }
+   700→    } catch {}
+   701→  });
+   702→  autoUpdater.on('update-not-available', () => {
+   703→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'up-to-date', version: APP_VERSION });
+   704→  });
+   705→  autoUpdater.on('error', (err) => {
+   706→    log('ERROR', 'Auto-updater error:', err.message);
+   707→    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update-status', { status: 'error', message: err.message });
+   708→  });
+   709→}
+   710→
+   711→// ─── IPC Handlers ───
+   712→ipcMain.on('window-minimize', () => { if (mainWindow) mainWindow.minimize(); });
+   713→ipcMain.on('window-maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
+   714→ipcMain.on('window-close', () => { if (!mainWindow) return; if (trayCreated) mainWindow.hide(); else { isQuitting = true; mainWindow.close(); } });
+   715→ipcMain.on('check-for-updates', () => checkForUpdates());
+   716→ipcMain.on('install-update', () => { if (autoUpdater && updateDownloaded) { isQuitting = true; autoUpdater.quitAndInstall(false, true); } });
+   717→ipcMain.on('retry-load', () => loadWebApp());
+   718→ipcMain.on('reload-page', () => { if (mainWindow) mainWindow.reload(); });
+   719→ipcMain.on('hard-refresh', () => hardRefresh());
+   720→ipcMain.on('clear-cache', async () => { await clearBrowserCache(); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('cache-cleared', { success: true }); });
+   721→ipcMain.handle('get-app-version', () => APP_VERSION);
+   722→ipcMain.handle('toggle-devtools', () => { if (mainWindow) mainWindow.webContents.toggleDevTools(); });
+   723→ipcMain.handle('get-log-path', () => logFile);
+   724→ipcMain.handle('is-desktop', () => true);
+   725→
+   726→// IPC: Save API keys to .env file so they persist across sessions and are available in main process
+   727→ipcMain.handle('save-api-keys', async (_, keys = {}) => {
+   728→  try {
+   729→    const envPath = path.join(__dirname, '..', '.env');
+   730→    const existingLines = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8').split('\n') : [];
+   731→    const envMap = {};
+   732→    for (const line of existingLines) {
+   733→      const trimmed = line.trim();
+   734→      if (!trimmed || trimmed.startsWith('#')) continue;
+   735→      const match = trimmed.match(/^([A-Z_]+)=(.*)$/);
+   736→      if (match) envMap[match[1]] = match[2].replace(/^["']|["']$/g, '');
+   737→    }
+   738→    const keyMapping = {
+   739→      groq: 'GROQ_API_KEY',
+   740→      openai: 'OPENAI_API_KEY',
+   741→      gemini: 'GEMINI_API_KEY',
+   742→      elevenlabs: 'ELEVENLABS_API_KEY',
+   743→      sarvam: 'SARVAM_API_KEY',
+   744→    };
+   745→    for (const [shortName, envName] of Object.entries(keyMapping)) {
+   746→      if (keys[shortName] !== undefined) {
+   747→        envMap[envName] = keys[shortName];
+   748→        process.env[envName] = keys[shortName]; // Also set in current process
+   749→      }
+   750→    }
+   751→    const lines = ['# JARVIS Hybrid API Keys', '# Auto-generated - do not edit manually'];
+   752→    for (const [key, value] of Object.entries(envMap)) {
+   753→      lines.push(`${key}=${value}`);
+   754→    }
+   755→    fs.writeFileSync(envPath, lines.join('\n') + '\n', 'utf8');
+   756→    log('INFO', '[Env] API keys saved to .env file');
+   757→    return { success: true };
+   758→  } catch (err) {
+   759→    log('ERROR', '[Env] Failed to save API keys:', err.message);
+   760→    return { success: false, error: err.message };
+   761→  }
+   762→});
+   763→
+   764→// IPC: Get available API key status (without revealing the actual keys)
+   765→ipcMain.handle('get-api-key-status', () => {
+   766→  return {
+   767→    groq: !!(process.env.GROQ_API_KEY),
+   768→    openai: !!(process.env.OPENAI_API_KEY),
+   769→    gemini: !!(process.env.GEMINI_API_KEY),
+   770→    elevenlabs: !!(process.env.ELEVENLABS_API_KEY),
+   771→    sarvam: !!(process.env.SARVAM_API_KEY),
+   772→  };
+   773→});
+   774→ipcMain.handle('get-app-url', () => CLOUD_APP_URL);
+   775→ipcMain.handle('get-platform', () => process.platform);
+   776→ipcMain.handle('get-status', () => ({ cloudReady, pythonReady, cloudError, pythonError, backendUrl: CLOUD_APP_URL }));
+   777→ipcMain.handle('listen-once', async (_, language) => listenWithWindowsSpeech(language));
+   778→ipcMain.handle('desktop-action', async (_, action = {}) => {
+   779→  try {
+   780→    const type = action.type || action.action;
+   781→    const nativeResult = await executeDesktopAction(action);
+   782→    if (nativeResult.success || nativeResult.message !== 'Unknown desktop action') return nativeResult;
+   783→    if (type === 'open-folder') {
+   784→      await shell.openPath(action.path);
+   785→      return { success: true, message: 'Opened folder' };
+   786→    }
+   787→    if (type === 'notification') {
+   788→      new Notification({ title: action.title || 'JARVIS', body: action.body || '' }).show();
+   789→      return { success: true, message: 'Notification shown' };
+   790→    }
+   791→    return { success: false, message: 'Unknown desktop action' };
+   792→  } catch (err) {
+   793→    return { success: false, message: err instanceof Error ? err.message : String(err) };
+   794→  }
+   795→});
+   796→
+   797→// ─── Voice IPC: Direct STT & TTS from Main Process ───
+   798→// These bypass the renderer's fetch() calls which can fail in Electron
+   799→
+   800→function buildMultipart(fields, boundary) {
+   801→  const parts = [];
+   802→  for (const [name, value] of Object.entries(fields)) {
+   803→    if (value && typeof value === 'object' && value.filename) {
+   804→      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${value.filename}"\r\nContent-Type: ${value.contentType || 'application/octet-stream'}\r\n\r\n`, 'utf8'));
+   805→      parts.push(Buffer.isBuffer(value.data) ? value.data : Buffer.from(value.data));
+   806→      parts.push(Buffer.from('\r\n', 'utf8'));
+   807→    } else {
+   808→      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`, 'utf8'));
+   809→    }
+   810→  }
+   811→  parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+   812→  return Buffer.concat(parts);
+   813→}
+   814→
+   815→function httpsPostBuffer(urlStr, body, headers) {
+   816→  return new Promise((resolve, reject) => {
+   817→    const parsedUrl = new URL(urlStr);
+   818→    const mod = parsedUrl.protocol === 'http:' ? require('http') : require('https');
+   819→    const options = {
+   820→      hostname: parsedUrl.hostname,
+   821→      port: parsedUrl.port || (parsedUrl.protocol === 'http:' ? 80 : 443),
+   822→      path: parsedUrl.pathname + parsedUrl.search,
+   823→      method: 'POST',
+   824→      headers: { ...headers, 'Content-Length': body.length },
+   825→    };
+   826→    const req = mod.request(options, (res) => {
+   827→      const chunks = [];
+   828→      res.on('data', (chunk) => chunks.push(chunk));
+   829→      res.on('end', () => {
+   830→        const data = Buffer.concat(chunks);
+   831→        resolve({ statusCode: res.statusCode, headers: res.headers, data });
+   832→      });
+   833→    });
+   834→    req.on('error', reject);
+   835→    req.setTimeout(30000, () => { req.destroy(new Error('Request timeout')); });
+   836→    req.write(body);
+   837→    req.end();
+   838→  });
+   839→}
+   840→
+   841→// IPC: Transcribe audio (base64) via Groq/OpenAI Whisper
+   842→ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur', apiKeys = {}) => {
+   843→  try {
+   844→    const audioBuffer = Buffer.from(base64Audio, 'base64');
+   845→    const groqKey = apiKeys.groq || process.env.GROQ_API_KEY || '';
+   846→    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+   847→
+   848→    if (!groqKey && !openaiKey) {
+   849→      return { success: false, error: 'Groq یا OpenAI API Key ضروری ہے۔ Settings میں جا کر API Key ڈالیں۔' };
+   850→    }
+   851→
+   852→    if (audioBuffer.length < 100) {
+   853→      return { success: false, error: 'آڈیو بہت چھوٹا ہے۔ دوبارہ مائیک پر بولیں۔' };
+   854→    }
+   855→
+   856→    log('INFO', '[STT-IPC] Starting transcription, audio size:', audioBuffer.length, 'language:', language);
+   857→
+   858→    // Detect audio format from binary header
+   859→    let filename = 'voice.webm';
+   860→    let contentType = 'audio/webm';
+   861→    if (audioBuffer.length > 4) {
+   862→      const header = audioBuffer.slice(0, 12).toString('hex');
+   863→      if (header.startsWith('52494646')) { // RIFF = WAV
+   864→        filename = 'voice.wav';
+   865→        contentType = 'audio/wav';
+   866→        log('INFO', '[STT-IPC] Detected WAV format');
+   867→      } else if (header.startsWith('fff3') || header.startsWith('fffb') || header.startsWith('ffe3') || header.startsWith('49443303')) { // MP3 / ID3
+   868→        filename = 'voice.mp3';
+   869→        contentType = 'audio/mpeg';
+   870→        log('INFO', '[STT-IPC] Detected MP3 format');
+   871→      } else if (header.startsWith('1a45dfa3') || header.includes('a1')) { // WebM / MKV
+   872→        filename = 'voice.webm';
+   873→        contentType = 'audio/webm';
+   874→        log('INFO', '[STT-IPC] Detected WebM/MKV format');
+   875→      } else if (header.startsWith('4f676753')) { // OGG
+   876→        filename = 'voice.ogg';
+   877→        contentType = 'audio/ogg';
+   878→        log('INFO', '[STT-IPC] Detected OGG format');
+   879→      } else {
+   880→        log('INFO', '[STT-IPC] Unknown audio format, defaulting to webm. Header:', header.substring(0, 16));
+   881→      }
+   882→    }
+   883→
+   884→    // Map language codes to Whisper-compatible codes
+   885→    const whisperLang = language === 'ur' ? 'ur' : language === 'en' ? 'en' : language || 'ur';
+   886→
+   887→    // Try Groq Whisper first (fastest, cheapest, best for Urdu)
+   888→    if (groqKey) {
+   889→      try {
+   890→        const boundary = '----JarvisSTT' + Date.now();
+   891→        const body = buildMultipart({
+   892→          file: { data: audioBuffer, filename, contentType },
+   893→          model: 'whisper-large-v3-turbo',
+   894→          language: whisperLang,
+   895→          response_format: 'json',
+   896→        }, boundary);
+   897→
+   898→        const result = await httpsPostBuffer('https://api.groq.com/openai/v1/audio/transcriptions', body, {
+   899→          'Authorization': `Bearer ${groqKey}`,
+   900→          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+   901→        });
+   902→
+   903→        log('INFO', '[STT-IPC] Groq response:', result.statusCode, 'size:', result.data.length);
+   904→
+   905→        if (result.statusCode === 200) {
+   906→          try {
+   907→            const json = JSON.parse(result.data.toString('utf8'));
+   908→            if (json.text && json.text.trim()) {
+   909→              log('INFO', '[STT-IPC] Groq Whisper success:', json.text.substring(0, 80));
+   910→              return { success: true, text: json.text.trim(), method: 'groq-whisper-ipc', language: json.language || whisperLang };
+   911→            }
+   912→            log('WARN', '[STT-IPC] Groq returned empty text');
+   913→          } catch (parseErr) {
+   914→            log('WARN', '[STT-IPC] Groq JSON parse error:', parseErr.message);
+   915→          }
+   916→        } else {
+   917→          const errBody = result.data.toString('utf8').substring(0, 300);
+   918→          log('WARN', '[STT-IPC] Groq failed:', result.statusCode, errBody);
+   919→          // If 401, API key is invalid — don't waste time retrying
+   920→          if (result.statusCode === 401) {
+   921→            return { success: false, error: 'Groq API Key غلط ہے۔ Settings میں درست Key ڈالیں۔' };
+   922→          }
+   923→        }
+   924→      } catch (err) {
+   925→        log('WARN', '[STT-IPC] Groq error:', err.message);
+   926→      }
+   927→    }
+   928→
+   929→    // Try OpenAI Whisper (better quality, more expensive)
+   930→    if (openaiKey) {
+   931→      try {
+   932→        const boundary = '----JarvisSTT' + Date.now();
+   933→        const body = buildMultipart({
+   934→          file: { data: audioBuffer, filename, contentType },
+   935→          model: 'whisper-1',
+   936→          language: whisperLang,
+   937→          response_format: 'verbose_json',
+   938→        }, boundary);
+   939→
+   940→        const result = await httpsPostBuffer('https://api.openai.com/v1/audio/transcriptions', body, {
+   941→          'Authorization': `Bearer ${openaiKey}`,
+   942→          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+   943→        });
+   944→
+   945→        log('INFO', '[STT-IPC] OpenAI response:', result.statusCode, 'size:', result.data.length);
+   946→
+   947→        if (result.statusCode === 200) {
+   948→          try {
+   949→            const json = JSON.parse(result.data.toString('utf8'));
+   950→            if (json.text && json.text.trim()) {
+   951→              log('INFO', '[STT-IPC] OpenAI Whisper success:', json.text.substring(0, 80));
+   952→              return { success: true, text: json.text.trim(), method: 'openai-whisper-ipc', language: json.language || whisperLang };
+   953→            }
+   954→            log('WARN', '[STT-IPC] OpenAI returned empty text');
+   955→          } catch (parseErr) {
+   956→            log('WARN', '[STT-IPC] OpenAI JSON parse error:', parseErr.message);
+   957→          }
+   958→        } else {
+   959→          const errBody = result.data.toString('utf8').substring(0, 300);
+   960→          log('WARN', '[STT-IPC] OpenAI failed:', result.statusCode, errBody);
+   961→          if (result.statusCode === 401) {
+   962→            return { success: false, error: 'OpenAI API Key غلط ہے۔ Settings میں درست Key ڈالیں۔' };
+   963→          }
+   964→        }
+   965→      } catch (err) {
+   966→        log('WARN', '[STT-IPC] OpenAI error:', err.message);
+   967→      }
+   968→    }
+   969→
+   970→    return { success: false, error: 'تمام ٹرانسکرپشن پرووائڈرز ناکام ہو گئے۔ API Keys چیک کریں۔' };
+   971→  } catch (err) {
+   972→    log('ERROR', '[STT-IPC] Error:', err.message);
+   973→    return { success: false, error: err.message };
+   974→  }
+   975→});
+   976→
+   977→// IPC: Generate TTS audio via ElevenLabs / OpenAI / Sarvam / Piper (offline)
+   978→// ElevenLabs voice discovery cache
+   979→let elevenlabsVoicesCache = null;
+   980→let elevenlabsVoicesCacheTime = 0;
+   981→const ELEVENLABS_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+   982→
+   983→async function discoverElevenLabsVoices(apiKey) {
+   984→  // Use cache if fresh
+   985→  if (elevenlabsVoicesCache && (Date.now() - elevenlabsVoicesCacheTime) < ELEVENLABS_CACHE_TTL) {
+   986→    return elevenlabsVoicesCache;
+   987→  }
+   988→  try {
+   989→    log('INFO', '[TTS-IPC] Discovering ElevenLabs voices...');
+   990→    const result = await httpsGetBuffer('https://api.elevenlabs.io/v1/voices', {
+   991→      'xi-api-key': apiKey,
+   992→      'Accept': 'application/json',
+   993→    });
+   994→    if (result.statusCode === 200) {
+   995→      const json = JSON.parse(result.data.toString('utf8'));
+   996→      const voices = json.voices || [];
+   997→      log('INFO', '[TTS-IPC] Found', voices.length, 'ElevenLabs voices');
+   998→
+   999→      // Categorize voices
+  1000→      const urduVoices = voices.filter(v =>
+  1001→        v.labels?.language?.toLowerCase().includes('urdu') ||
+  1002→        v.labels?.language?.toLowerCase().includes('hindi') ||
+  1003→        v.labels?.accent?.toLowerCase().includes('indian') ||
+  1004→        v.labels?.language?.toLowerCase().includes('ur') ||
+  1005→        v.name?.toLowerCase().includes('hindi') ||
+  1006→        v.name?.toLowerCase().includes('urdu')
+  1007→      );
+  1008→      const englishVoices = voices.filter(v =>
+  1009→        v.labels?.language?.toLowerCase().includes('english') ||
+  1010→        v.labels?.accent?.toLowerCase().includes('american') ||
+  1011→        v.labels?.accent?.toLowerCase().includes('british')
+  1012→      );
+  1013→      const clonedVoices = voices.filter(v => v.category === 'cloned');
+  1014→
+  1015→      const cache = { all: voices, urdu: urduVoices, english: englishVoices, cloned: clonedVoices };
+  1016→      elevenlabsVoicesCache = cache;
+  1017→      elevenlabsVoicesCacheTime = Date.now();
+  1018→      return cache;
+  1019→    }
+  1020→    log('WARN', '[TTS-IPC] Voice discovery failed:', result.statusCode);
+  1021→  } catch (err) {
+  1022→    log('WARN', '[TTS-IPC] Voice discovery error:', err.message);
+  1023→  }
+  1024→  return null;
+  1025→}
+  1026→
+  1027→function httpsGetBuffer(urlStr, headers) {
+  1028→  return new Promise((resolve, reject) => {
+  1029→    const parsedUrl = new URL(urlStr);
+  1030→    const mod = parsedUrl.protocol === 'http:' ? require('http') : require('https');
+  1031→    const options = {
+  1032→      hostname: parsedUrl.hostname,
+  1033→      port: parsedUrl.port || (parsedUrl.protocol === 'http:' ? 80 : 443),
+  1034→      path: parsedUrl.pathname + parsedUrl.search,
+  1035→      method: 'GET',
+  1036→      headers: headers || {},
+  1037→    };
+  1038→    const req = mod.request(options, (res) => {
+  1039→      const chunks = [];
+  1040→      res.on('data', (chunk) => chunks.push(chunk));
+  1041→      res.on('end', () => {
+  1042→        const data = Buffer.concat(chunks);
+  1043→        resolve({ statusCode: res.statusCode, headers: res.headers, data });
+  1044→      });
+  1045→    });
+  1046→    req.on('error', reject);
+  1047→    req.setTimeout(15000, () => { req.destroy(new Error('Request timeout')); });
+  1048→    req.end();
+  1049→  });
+  1050→}
+  1051→
+  1052→// ─── Edge TTS (Microsoft, free, excellent Urdu quality) ───
+  1053→// Uses Python edge-tts package: pip install edge-tts
+  1054→// This is an ONLINE service but FREE with no API key needed
+  1055→
+  1056→const EDGE_TTS_VOICES = {
+  1057→  ur: 'ur-PK-UzmaNeural',      // Best Urdu female voice
+  1058→  en: 'en-US-AriaNeural',       // Best English female voice
+  1059→  ur_male: 'ur-PK-AsadNeural',  // Urdu male voice
+  1060→  en_male: 'en-US-GuyNeural',   // English male voice
+  1061→};
+  1062→
+  1063→async function generateEdgeTTS(text, lang) {
+  1064→  try {
+  1065→    // Try Python edge-tts command
+  1066→    const voice = EDGE_TTS_VOICES[lang] || EDGE_TTS_VOICES.ur;
+  1067→    const outputFile = path.join(app.getPath('temp'), `edge-tts-${Date.now()}.mp3`);
+  1068→
+  1069→    // First check if edge-tts is installed
+  1070→    const checkResult = await runCommand('python', ['-c', 'import edge_tts; print("ok")'], { timeout: 5000 });
+  1071→    if (!checkResult.success || !checkResult.stdout.includes('ok')) {
+  1072→      // Try pip install edge-tts
+  1073→      log('INFO', '[EdgeTTS] Installing edge-tts...');
+  1074→      const installResult = await runCommand('pip', ['install', 'edge-tts', '-q'], { timeout: 60000 });
+  1075→      if (!installResult.success) {
+  1076→        log('WARN', '[EdgeTTS] Failed to install edge-tts:', installResult.error);
+  1077→        return { success: false, error: 'edge-tts Python package install failed' };
+  1078→      }
+  1079→    }
+  1080→
+  1081→    const result = await runCommand('edge-tts', [
+  1082→      '--voice', voice,
+  1083→      '--text', text.substring(0, 5000),
+  1084→      '--write-media', outputFile,
+  1085→      '--rate', '+0%',
+  1086→    ], { timeout: 30000 });
+  1087→
+  1088→    if (fs.existsSync(outputFile)) {
+  1089→      const audioBuffer = fs.readFileSync(outputFile);
+  1090→      try { fs.unlinkSync(outputFile); } catch {}
+  1091→      if (audioBuffer.length > 100) {
+  1092→        log('INFO', '[EdgeTTS] Success, size:', audioBuffer.length, 'voice:', voice);
+  1093→        return { success: true, audioBase64: audioBuffer.toString('base64'), contentType: 'audio/mpeg', method: 'edge-tts' };
+  1094→      }
+  1095→    }
+  1096→    return { success: false, error: 'Edge TTS generation failed: ' + (result.error || result.stderr || 'unknown') };
+  1097→  } catch (err) {
+  1098→    log('WARN', '[EdgeTTS] Error:', err.message);
+  1099→    return { success: false, error: err.message };
+  1100→  }
+  1101→}
+  1102→
+  1103→// Piper TTS offline engine
+  1104→let piperProcess = null;
+  1105→const PIPER_MODELS_DIR = path.join(app.getPath('userData'), 'piper-models');
+  1106→const PIPER_BIN_DIR = path.join(app.getPath('userData'), 'piper');
+  1107→
+  1108→// Auto-download Piper binary if not found
+  1109→async function ensurePiperBinary() {
+  1110→  try {
+  1111→    const piperBin = process.platform === 'win32' ? 'piper.exe' : 'piper';
+  1112→    const localPiperPath = path.join(PIPER_BIN_DIR, piperBin);
+  1113→
+  1114→    // Already downloaded?
+  1115→    if (fs.existsSync(localPiperPath)) {
+  1116→      return { ready: true, path: localPiperPath };
+  1117→    }
+  1118→
+  1119→    // Check PATH
+  1120→    try {
+  1121→      const whichResult = await runCommand(process.platform === 'win32' ? 'where' : 'which', [piperBin]);
+  1122→      if (whichResult.success && whichResult.stdout.trim()) {
+  1123→        const foundPath = whichResult.stdout.trim().split('\n')[0].trim();
+  1124→        return { ready: true, path: foundPath };
+  1125→      }
+  1126→    } catch {}
+  1127→
+  1128→    // Auto-download Piper binary for Windows
+  1129→    if (process.platform === 'win32') {
+  1130→      log('INFO', '[Piper] Auto-downloading piper.exe...');
+  1131→      if (!fs.existsSync(PIPER_BIN_DIR)) {
+  1132→        fs.mkdirSync(PIPER_BIN_DIR, { recursive: true });
+  1133→      }
+  1134→
+  1135→      // Download Piper Windows release
+  1136→      const piperVersion = '2023.11.14-2';
+  1137→      const piperUrl = `https://github.com/rhasspy/piper/releases/download/${piperVersion}/piper_windows_amd64.zip`;
+  1138→      const zipPath = path.join(PIPER_BIN_DIR, 'piper.zip');
+  1139→
+  1140→      const downloadResult = await downloadFile(piperUrl, zipPath);
+  1141→      if (!downloadResult.success) {
+  1142→        log('WARN', '[Piper] Download failed:', downloadResult.error);
+  1143→        return { ready: false, error: 'Piper binary download failed: ' + downloadResult.error };
+  1144→      }
+  1145→
+  1146→      // Extract using PowerShell
+  1147→      const extractResult = await ps(`Expand-Archive -Path '${zipPath}' -DestinationPath '${PIPER_BIN_DIR}' -Force`);
+  1148→      try { fs.unlinkSync(zipPath); } catch {}
+  1149→
+  1150→      if (extractResult.success || fs.existsSync(localPiperPath)) {
+  1151→        log('INFO', '[Piper] Binary downloaded and extracted successfully');
+  1152→        return { ready: true, path: localPiperPath };
+  1153→      }
+  1154→
+  1155→      // Check if piper.exe is in a subdirectory
+  1156→      const subDir = path.join(PIPER_BIN_DIR, 'piper');
+  1157→      const subPiperPath = path.join(subDir, piperBin);
+  1158→      if (fs.existsSync(subPiperPath)) {
+  1159→        // Move to expected location
+  1160→        try {
+  1161→          const files = fs.readdirSync(subDir);
+  1162→          for (const file of files) {
+  1163→            const src = path.join(subDir, file);
+  1164→            const dest = path.join(PIPER_BIN_DIR, file);
+  1165→            if (!fs.existsSync(dest)) {
+  1166→              fs.copyFileSync(src, dest);
+  1167→            }
+  1168→          }
+  1169→        } catch {}
+  1170→        if (fs.existsSync(localPiperPath)) {
+  1171→          return { ready: true, path: localPiperPath };
+  1172→        }
+  1173→        return { ready: true, path: subPiperPath };
+  1174→      }
+  1175→
+  1176→      return { ready: false, error: 'Piper binary not found after extraction' };
+  1177→    }
+  1178→
+  1179→    return { ready: false, error: 'Piper binary auto-download only supported on Windows. Install manually.' };
+  1180→  } catch (err) {
+  1181→    log('WARN', '[Piper] Binary check error:', err.message);
+  1182→    return { ready: false, error: err.message };
+  1183→  }
+  1184→}
+  1185→
+  1186→async function ensurePiperModel(lang) {
+  1187→  try {
+  1188→    if (!fs.existsSync(PIPER_MODELS_DIR)) {
+  1189→      fs.mkdirSync(PIPER_MODELS_DIR, { recursive: true });
+  1190→    }
+  1191→
+  1192→    // Urdu model: Piper fasih voice (natural Urdu)
+  1193→    const modelFile = lang === 'ur'
+  1194→      ? 'ur_PK-fasih-medium.onnx'
+  1195→      : 'en_US-lessac-medium.onnx';
+  1196→    const modelConfig = modelFile.replace('.onnx', '.onnx.json');
+  1197→    const modelPath = path.join(PIPER_MODELS_DIR, modelFile);
+  1198→    const configPath = path.join(PIPER_MODELS_DIR, modelConfig);
+  1199→
+  1200→    if (fs.existsSync(modelPath) && fs.existsSync(configPath)) {
+  1201→      return { ready: true, modelPath, configPath };
+  1202→    }
+  1203→
+  1204→    log('INFO', '[Piper] Model not found, would need download:', modelFile);
+  1205→    return { ready: false, modelPath, configPath, needsDownload: true, modelFile, modelConfig };
+  1206→  } catch (err) {
+  1207→    log('WARN', '[Piper] Model check error:', err.message);
+  1208→    return { ready: false, error: err.message };
+  1209→  }
+  1210→}
+  1211→
+  1212→async function generatePiperTTS(text, lang) {
+  1213→  try {
+  1214→    const modelInfo = await ensurePiperModel(lang);
+  1215→    if (!modelInfo.ready) {
+  1216→      return { success: false, error: 'Piper model not downloaded. Go to Settings > Voice to download offline models.' };
+  1217→    }
+  1218→
+  1219→    // Try to find or auto-download piper binary
+  1220→    const binaryInfo = await ensurePiperBinary();
+  1221→    if (!binaryInfo.ready) {
+  1222→      return { success: false, error: 'Piper TTS engine not installed: ' + (binaryInfo.error || 'Auto-download failed') };
+  1223→    }
+  1224→
+  1225→    const outputFile = path.join(app.getPath('temp'), `piper-tts-${Date.now()}.wav`);
+  1226→    const result = await runCommand(binaryInfo.path, [
+  1227→      '--model', modelInfo.modelPath,
+  1228→      '--config', modelInfo.configPath,
+  1229→      '--output_file', outputFile,
+  1230→    ], {
+  1231→      input: text.substring(0, 2000),
+  1232→      timeout: 30000,
+  1233→    });
+  1234→
+  1235→    if (result.success || fs.existsSync(outputFile)) {
+  1236→      const audioBuffer = fs.readFileSync(outputFile);
+  1237→      try { fs.unlinkSync(outputFile); } catch {}
+  1238→      if (audioBuffer.length > 500) {
+  1239→        log('INFO', '[Piper] TTS success, size:', audioBuffer.length);
+  1240→        return { success: true, audioBase64: audioBuffer.toString('base64'), contentType: 'audio/wav', method: 'piper-offline' };
+  1241→      }
+  1242→    }
+  1243→    return { success: false, error: 'Piper TTS generation failed' };
+  1244→  } catch (err) {
+  1245→    log('WARN', '[Piper] Error:', err.message);
+  1246→    return { success: false, error: err.message };
+  1247→  }
+  1248→}
+  1249→
+  1250→ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', apiKeys = {}) => {
+  1251→  try {
+  1252→    return await generateTTSInternal(text, lang, emotion, apiKeys);
+  1253→  } catch (err) {
+  1254→    log('ERROR', '[TTS-IPC] Error:', err.message);
+  1255→    return { success: false, error: err.message };
+  1256→  }
+  1257→});
+  1258→
+  1259→// IPC: Get ElevenLabs voice list
+  1260→ipcMain.handle('get-elevenlabs-voices', async (_, apiKeys = {}) => {
+  1261→  const elevenlabsKey = apiKeys.elevenlabs || process.env.ELEVENLABS_API_KEY || '';
+  1262→  if (!elevenlabsKey) return { success: false, voices: [], error: 'ElevenLabs API key not set' };
+  1263→  const voiceInfo = await discoverElevenLabsVoices(elevenlabsKey);
+  1264→  if (voiceInfo) {
+  1265→    return {
+  1266→      success: true,
+  1267→      voices: voiceInfo.all.map(v => ({
+  1268→        id: v.voice_id,
+  1269→        name: v.name,
+  1270→        category: v.category,
+  1271→        labels: v.labels,
+  1272→      })),
+  1273→      urduCount: voiceInfo.urdu.length,
+  1274→      englishCount: voiceInfo.english.length,
+  1275→      clonedCount: voiceInfo.cloned.length,
+  1276→    };
+  1277→  }
+  1278→  return { success: false, voices: [], error: 'Failed to fetch voices' };
+  1279→});
+  1280→
+  1281→// IPC: Piper model status and download
+  1282→ipcMain.handle('piper-model-status', async () => {
+  1283→  try {
+  1284→    const urModel = await ensurePiperModel('ur');
+  1285→    const enModel = await ensurePiperModel('en');
+  1286→    const binaryInfo = await ensurePiperBinary();
+  1287→    const edgeCheck = await runCommand('python', ['-c', 'import edge_tts; print("ok")'], { timeout: 5000 });
+  1288→    return {
+  1289→      success: true,
+  1290→      urdu: { ready: urModel.ready, modelPath: urModel.modelPath },
+  1291→      english: { ready: enModel.ready, modelPath: enModel.modelPath },
+  1292→      binary: { ready: binaryInfo.ready, path: binaryInfo.path },
+  1293→      edgeTTS: { available: edgeCheck.success && edgeCheck.stdout.includes('ok') },
+  1294→      modelsDir: PIPER_MODELS_DIR,
+  1295→      binDir: PIPER_BIN_DIR,
+  1296→    };
+  1297→  } catch (err) {
+  1298→    return { success: false, error: err.message };
+  1299→  }
+  1300→});
+  1301→
+  1302→// IPC: Download Piper model
+  1303→ipcMain.handle('download-piper-model', async (_, lang) => {
+  1304→  try {
+  1305→    const modelInfo = await ensurePiperModel(lang);
+  1306→    if (modelInfo.ready) {
+  1307→      return { success: true, message: 'Model already downloaded' };
+  1308→    }
+  1309→
+  1310→    if (!fs.existsSync(PIPER_MODELS_DIR)) {
+  1311→      fs.mkdirSync(PIPER_MODELS_DIR, { recursive: true });
+  1312→    }
+  1313→
+  1314→    // Piper model URLs from the official HuggingFace repository
+  1315→    const modelUrls = {
+  1316→      ur: {
+  1317→        model: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/ur/ur_PK/fasih/medium/ur_PK-fasih-medium.onnx',
+  1318→        config: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/ur/ur_PK/fasih/medium/ur_PK-fasih-medium.onnx.json',
+  1319→        modelFile: 'ur_PK-fasih-medium.onnx',
+  1320→        configFile: 'ur_PK-fasih-medium.onnx.json',
+  1321→      },
+  1322→      en: {
+  1323→        model: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx',
+  1324→        config: 'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json',
+  1325→        modelFile: 'en_US-lessac-medium.onnx',
+  1326→        configFile: 'en_US-lessac-medium.onnx.json',
+  1327→      },
+  1328→    };
+  1329→
+  1330→    const urls = modelUrls[lang];
+  1331→    if (!urls) return { success: false, error: 'Unsupported language: ' + lang };
+  1332→
+  1333→    // Download model file
+  1334→    log('INFO', '[Piper] Downloading', lang, 'model...');
+  1335→    if (mainWindow && !mainWindow.isDestroyed()) {
+  1336→      mainWindow.webContents.send('piper-download-progress', { lang, status: 'downloading-model', percent: 0 });
+  1337→    }
+  1338→
+  1339→    const modelResult = await downloadFile(urls.model, path.join(PIPER_MODELS_DIR, urls.modelFile));
+  1340→    if (!modelResult.success) return { success: false, error: 'Model download failed: ' + modelResult.error };
+  1341→
+  1342→    // Download config file
+  1343→    if (mainWindow && !mainWindow.isDestroyed()) {
+  1344→      mainWindow.webContents.send('piper-download-progress', { lang, status: 'downloading-config', percent: 80 });
+  1345→    }
+  1346→
+  1347→    const configResult = await downloadFile(urls.config, path.join(PIPER_MODELS_DIR, urls.configFile));
+  1348→    if (!configResult.success) return { success: false, error: 'Config download failed: ' + configResult.error };
+  1349→
+  1350→    if (mainWindow && !mainWindow.isDestroyed()) {
+  1351→      mainWindow.webContents.send('piper-download-progress', { lang, status: 'complete', percent: 100 });
+  1352→    }
+  1353→
+  1354→    log('INFO', '[Piper]', lang, 'model downloaded successfully');
+  1355→    return { success: true, message: `${lang === 'ur' ? 'Urdu' : 'English'} model downloaded successfully` };
+  1356→  } catch (err) {
+  1357→    log('ERROR', '[Piper] Download error:', err.message);
+  1358→    return { success: false, error: err.message };
+  1359→  }
+  1360→});
+  1361→
+  1362→// IPC: Download Piper binary
+  1363→ipcMain.handle('download-piper-binary', async () => {
+  1364→  try {
+  1365→    const result = await ensurePiperBinary();
+  1366→    return result;
+  1367→  } catch (err) {
+  1368→    return { success: false, error: err.message };
+  1369→  }
+  1370→});
+  1371→
+  1372→// ─── CRM Database (SQLite via better-sqlite3 fallback to JSON file) ───
+  1373→const CRM_DB_PATH = path.join(app.getPath('userData'), 'jarvis-crm.json');
+  1374→
+  1375→function loadCRM() {
+  1376→  try {
+  1377→    if (fs.existsSync(CRM_DB_PATH)) {
+  1378→      return JSON.parse(fs.readFileSync(CRM_DB_PATH, 'utf8'));
+  1379→    }
+  1380→  } catch (err) {
+  1381→    log('WARN', '[CRM] Load error:', err.message);
+  1382→  }
+  1383→  return { leads: [], proposals: [], clients: [], activities: [], settings: {} };
+  1384→}
+  1385→
+  1386→function saveCRM(data) {
+  1387→  try {
+  1388→    fs.writeFileSync(CRM_DB_PATH, JSON.stringify(data, null, 2), 'utf8');
+  1389→    return true;
+  1390→  } catch (err) {
+  1391→    log('ERROR', '[CRM] Save error:', err.message);
+  1392→    return false;
+  1393→  }
+  1394→}
+  1395→
+  1396→// IPC: CRM - Get all data
+  1397→ipcMain.handle('crm-get-all', async () => {
+  1398→  return { success: true, data: loadCRM() };
+  1399→});
+  1400→
+  1401→// IPC: CRM - Add lead
+  1402→ipcMain.handle('crm-add-lead', async (_, lead) => {
+  1403→  const crm = loadCRM();
+  1404→  const newLead = {
+  1405→    id: `lead_${Date.now()}`,
+  1406→    ...lead,
+  1407→    createdAt: new Date().toISOString(),
+  1408→    score: lead.score || 50,
+  1409→    status: lead.status || 'warm',
+  1410→  };
+  1411→  crm.leads.push(newLead);
+  1412→  crm.activities.push({
+  1413→    id: `act_${Date.now()}`,
+  1414→    agent: 'CRM Agent',
+  1415→    action: 'Lead Added',
+  1416→    detail: `${lead.client} - ${lead.service} from ${lead.platform}`,
+  1417→    time: new Date().toISOString(),
+  1418→    type: 'success',
+  1419→  });
+  1420→  saveCRM(crm);
+  1421→  return { success: true, lead: newLead };
+  1422→});
+  1423→
+  1424→// IPC: CRM - Update lead
+  1425→ipcMain.handle('crm-update-lead', async (_, id, updates) => {
+  1426→  const crm = loadCRM();
+  1427→  const idx = crm.leads.findIndex((l) => l.id === id);
+  1428→  if (idx === -1) return { success: false, error: 'Lead not found' };
+  1429→  crm.leads[idx] = { ...crm.leads[idx], ...updates };
+  1430→  saveCRM(crm);
+  1431→  return { success: true, lead: crm.leads[idx] };
+  1432→});
+  1433→
+  1434→// IPC: CRM - Add proposal
+  1435→ipcMain.handle('crm-add-proposal', async (_, proposal) => {
+  1436→  const crm = loadCRM();
+  1437→  const newProposal = {
+  1438→    id: `prop_${Date.now()}`,
+  1439→    ...proposal,
+  1440→    createdAt: new Date().toISOString(),
+  1441→    status: proposal.status || 'draft',
+  1442→  };
+  1443→  crm.proposals.push(newProposal);
+  1444→  crm.activities.push({
+  1445→    id: `act_${Date.now()}`,
+  1446→    agent: 'Proposal Agent',
+  1447→    action: 'Proposal Created',
+  1448→    detail: `${proposal.client} - ${proposal.service} - ${proposal.amount}`,
+  1449→    time: new Date().toISOString(),
+  1450→    type: 'info',
+  1451→  });
+  1452→  saveCRM(crm);
+  1453→  return { success: true, proposal: newProposal };
+  1454→});
+  1455→
+  1456→// IPC: CRM - Update proposal
+  1457→ipcMain.handle('crm-update-proposal', async (_, id, updates) => {
+  1458→  const crm = loadCRM();
+  1459→  const idx = crm.proposals.findIndex((p) => p.id === id);
+  1460→  if (idx === -1) return { success: false, error: 'Proposal not found' };
+  1461→  crm.proposals[idx] = { ...crm.proposals[idx], ...updates };
+  1462→  saveCRM(crm);
+  1463→  return { success: true, proposal: crm.proposals[idx] };
+  1464→});
+  1465→
+  1466→// IPC: CRM - Add activity
+  1467→ipcMain.handle('crm-add-activity', async (_, activity) => {
+  1468→  const crm = loadCRM();
+  1469→  crm.activities.push({
+  1470→    id: `act_${Date.now()}`,
+  1471→    ...activity,
+  1472→    time: new Date().toISOString(),
+  1473→  });
+  1474→  // Keep only last 200 activities
+  1475→  if (crm.activities.length > 200) {
+  1476→    crm.activities = crm.activities.slice(-200);
+  1477→  }
+  1478→  saveCRM(crm);
+  1479→  return { success: true };
+  1480→});
+  1481→
+  1482→// IPC: CRM - Generate proposal using AI
+  1483→ipcMain.handle('crm-generate-proposal', async (_, jobDescription, serviceType, clientName, apiKeys = {}) => {
+  1484→  try {
+  1485→    const activeProvider = apiKeys.groq ? 'groq' : apiKeys.gemini ? 'gemini' : apiKeys.openai ? 'openai' : 'groq';
+  1486→    const prompt = `You are JARVIS, a professional freelance proposal writer. Generate a compelling proposal for:
+  1487→
+  1488→Client: ${clientName || 'Potential Client'}
+  1489→Service: ${serviceType}
+  1490→Job Description: ${jobDescription}
+  1491→
+  1492→Create a professional proposal with:
+  1493→1. Greeting & hook (show understanding of their needs)
+  1494→2. Relevant experience & approach
+  1495→3. Timeline estimate
+  1496→4. Three pricing tiers (Basic, Standard, Premium) with specific deliverables
+  1497→5. Call to action
+  1498→
+  1499→Format: Clean, professional, ready to send. Use markdown formatting.
+  1500→Language: Match the client's language (English or Urdu/Roman Urdu based on job description).`;
+  1501→
+  1502→    const result = await generateChatCompletion(prompt, [], activeProvider, apiKeys);
+  1503→    if (result.success) {
+  1504→      return { success: true, proposal: result.content };
+  1505→    }
+  1506→    return { success: false, error: result.error || 'AI generation failed' };
+  1507→  } catch (err) {
+  1508→    return { success: false, error: err.message };
+  1509→  }
+  1510→});
+  1511→
+  1512→// IPC: CRM - Score a lead
+  1513→ipcMain.handle('crm-score-lead', async (_, leadData, apiKeys = {}) => {
+  1514→  try {
+  1515→    const activeProvider = apiKeys.groq ? 'groq' : apiKeys.gemini ? 'gemini' : apiKeys.openai ? 'openai' : 'groq';
+  1516→    const prompt = `You are a lead scoring AI. Analyze this freelance lead and give a score from 0-100.
+  1517→
+  1518→Client: ${leadData.client || 'Unknown'}
+  1519→Platform: ${leadData.platform || 'Unknown'}
+  1520→Service: ${leadData.service || 'Unknown'}
+  1521→Budget: ${leadData.budget || 'Not specified'}
+  1522→Description: ${leadData.description || 'No description'}
+  1523→
+  1524→Score based on: budget realism, client seriousness, skill match, urgency, platform trust, competition, closing probability.
+  1525→
+  1526→Respond in JSON format only:
+  1527→{"score": <number>, "reasoning": "<brief explanation>", "action": "<recommended action>", "riskLevel": "<low/medium/high>"}`;
+  1528→
+  1529→    const result = await generateChatCompletion(prompt, [], activeProvider, apiKeys);
+  1530→    if (result.success) {
+  1531→      try {
+  1532→        // Try to extract JSON from the response
+  1533→        const jsonMatch = result.content.match(/\{[\s\S]*\}/);
+  1534→        if (jsonMatch) {
+  1535→          return { success: true, scoring: JSON.parse(jsonMatch[0]) };
+  1536→        }
+  1537→      } catch {}
+  1538→      return { success: true, scoring: { score: 50, reasoning: result.content, action: 'Review manually', riskLevel: 'medium' } };
+  1539→    }
+  1540→    return { success: false, error: result.error || 'Scoring failed' };
+  1541→  } catch (err) {
+  1542→    return { success: false, error: err.message };
+  1543→  }
+  1544→});
+  1545→
+  1546→// IPC: CRM - Calculate pricing
+  1547→ipcMain.handle('crm-calculate-pricing', async (_, serviceType, complexity, apiKeys = {}) => {
+  1548→  try {
+  1549→    const activeProvider = apiKeys.groq ? 'groq' : apiKeys.gemini ? 'gemini' : apiKeys.openai ? 'openai' : 'groq';
+  1550→    const prompt = `You are a freelance pricing expert for a developer who provides: Website, Desktop Software, Android Apps, Automation Systems, AI Tools.
+  1551→
+  1552→Service: ${serviceType}
+  1553→Complexity: ${complexity}
+  1554→
+  1555→Provide pricing in USD for a Pakistani freelancer. Respond ONLY in JSON format:
+  1556→{
+  1557→  "basic": {"price": <number>, "timeline": "<string>", "deliverables": ["<item1>", "<item2>"]},
+  1558→  "standard": {"price": <number>, "timeline": "<string>", "deliverables": ["<item1>", "<item2>", "<item3>"]},
+  1559→  "premium": {"price": <number>, "timeline": "<string>", "deliverables": ["<item1>", "<item2>", "<item3>", "<item4>"]},
+  1560→  "marketRate": "<low-high range>",
+  1561→  "negotiationRange": "<min-max>",
+  1562→  "notes": "<brief advice>"
+  1563→}`;
+  1564→
+  1565→    const result = await generateChatCompletion(prompt, [], activeProvider, apiKeys);
+  1566→    if (result.success) {
+  1567→      try {
+  1568→        const jsonMatch = result.content.match(/\{[\s\S]*\}/);
+  1569→        if (jsonMatch) {
+  1570→          return { success: true, pricing: JSON.parse(jsonMatch[0]) };
+  1571→        }
+  1572→      } catch {}
+  1573→      return { success: true, pricing: { basic: { price: 500 }, standard: { price: 1500 }, premium: { price: 3000 }, notes: result.content } };
+  1574→    }
+  1575→    return { success: false, error: result.error || 'Pricing failed' };
+  1576→  } catch (err) {
+  1577→    return { success: false, error: err.message };
+  1578→  }
+  1579→});
+  1580→
+  1581→// IPC: Install edge-tts Python package
+  1582→ipcMain.handle('install-edge-tts', async () => {
+  1583→  try {
+  1584→    log('INFO', '[EdgeTTS] Installing via pip...');
+  1585→    const result = await runCommand('pip', ['install', 'edge-tts', '-q'], { timeout: 120000 });
+  1586→    if (result.success) {
+  1587→      log('INFO', '[EdgeTTS] Installed successfully');
+  1588→      return { success: true, message: 'edge-tts installed successfully' };
+  1589→    }
+  1590→    return { success: false, error: result.error || 'Install failed' };
+  1591→  } catch (err) {
+  1592→    return { success: false, error: err.message };
+  1593→  }
+  1594→});
+  1595→
+  1596→// IPC: Test TTS - generate short test audio
+  1597→ipcMain.handle('test-tts', async (_, lang = 'ur') => {
+  1598→  try {
+  1599→    const testText = lang === 'ur' ? 'سلام، میں جاروس ہوں۔ آواز ٹیسٹ کامیاب!' : 'Hello, I am JARVIS. Voice test successful!';
+  1600→    const apiKeys = {
+  1601→      elevenlabs: process.env.ELEVENLABS_API_KEY || '',
+  1602→      openai: process.env.OPENAI_API_KEY || '',
+  1603→      sarvam: process.env.SARVAM_API_KEY || '',
+  1604→    };
+  1605→    // Directly call the TTS generation logic (same cascade as tts-generate)
+  1606→    if (!testText || !testText.trim()) {
+  1607→      return { success: false, error: 'No text provided for TTS test' };
+  1608→    }
+  1609→    // Re-use the full TTS pipeline by emitting the same logic
+  1610→    // We call generateTTSInternal directly
+  1611→    const result = await generateTTSInternal(testText, lang, 'normal', apiKeys);
+  1612→    return result;
+  1613→  } catch (err) {
+  1614→    return { success: false, error: err.message };
+  1615→  }
+  1616→});
+  1617→
+  1618→// Internal TTS generation function (shared by tts-generate and test-tts)
+  1619→async function generateTTSInternal(text, lang = 'ur', emotion = 'normal', apiKeys = {}) {
+  1620→  if (!text || !text.trim()) {
+  1621→    return { success: false, error: 'No text provided for TTS' };
+  1622→  }
+  1623→
+  1624→  const elevenlabsKey = apiKeys.elevenlabs || process.env.ELEVENLABS_API_KEY || '';
+  1625→  const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+  1626→  const sarvamKey = apiKeys.sarvam || process.env.SARVAM_API_KEY || '';
+  1627→
+  1628→  log('INFO', '[TTS] Generating, lang:', lang, 'emotion:', emotion, 'text length:', text.length);
+  1629→
+  1630→  // ─── Try ElevenLabs ───
+  1631→  if (elevenlabsKey) {
+  1632→    try {
+  1633→      const voiceInfo = await discoverElevenLabsVoices(elevenlabsKey);
+  1634→      let voiceId = null;
+  1635→      let modelId = 'eleven_turbo_v2_5';
+  1636→
+  1637→      if (voiceInfo) {
+  1638→        if (lang === 'ur') {
+  1639→          if (voiceInfo.cloned?.length > 0) { voiceId = voiceInfo.cloned[0].voice_id; modelId = 'eleven_multilingual_v2'; }
+  1640→          else if (voiceInfo.urdu?.length > 0) { voiceId = voiceInfo.urdu[0].voice_id; modelId = 'eleven_multilingual_v2'; }
+  1641→        } else {
+  1642→          if (voiceInfo.cloned?.length > 0) { voiceId = voiceInfo.cloned[0].voice_id; }
+  1643→          else if (voiceInfo.english?.length > 0) { voiceId = voiceInfo.english[0].voice_id; }
+  1644→        }
+  1645→        if (!voiceId && voiceInfo.all?.length > 0) { voiceId = voiceInfo.all[0].voice_id; modelId = 'eleven_multilingual_v2'; }
+  1646→      }
+  1647→      if (!voiceId) {
+  1648→        voiceId = (lang === 'ur' ? '21m00Tcm4TlvDq8ikWAM' : 'EXAVITQu4vr4xnSDxMaL');
+  1649→        modelId = 'eleven_multilingual_v2';
+  1650→      }
+  1651→
+  1652→      const emotionSettings = {
+  1653→        happy: { stability: 0.35, similarity: 0.75, style: 0.8 },
+  1654→        serious: { stability: 0.55, similarity: 0.8, style: 0.4 },
+  1655→        sympathetic: { stability: 0.5, similarity: 0.78, style: 0.6 },
+  1656→        surprised: { stability: 0.3, similarity: 0.72, style: 0.85 },
+  1657→        encouraging: { stability: 0.4, similarity: 0.76, style: 0.7 },
+  1658→        normal: { stability: 0.4, similarity: 0.78, style: 0.55 },
+  1659→      };
+  1660→      const settings = emotionSettings[emotion] || emotionSettings.normal;
+  1661→      const bodyStr = JSON.stringify({
+  1662→        text: text.substring(0, 5000), model_id: modelId,
+  1663→        voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, style: settings.style, use_speaker_boost: true },
+  1664→        output_format: 'mp3_44100_128',
+  1665→      });
+  1666→
+  1667→      const result = await httpsPostBuffer(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, Buffer.from(bodyStr, 'utf8'), {
+  1668→        'Content-Type': 'application/json', 'xi-api-key': elevenlabsKey.trim(), 'Accept': 'audio/mpeg',
+  1669→      });
+  1670→      if (result.statusCode === 200 && result.data.length > 100) {
+  1671→        return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'elevenlabs-ipc' };
+  1672→      }
+  1673→      // Try multilingual v2 fallback
+  1674→      if (result.statusCode !== 401 && modelId !== 'eleven_multilingual_v2') {
+  1675→        const bodyStr2 = JSON.stringify({
+  1676→          text: text.substring(0, 5000), model_id: 'eleven_multilingual_v2',
+  1677→          voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, style: settings.style, use_speaker_boost: true },
+  1678→          output_format: 'mp3_44100_128',
+  1679→        });
+  1680→        const result2 = await httpsPostBuffer(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, Buffer.from(bodyStr2, 'utf8'), {
+  1681→          'Content-Type': 'application/json', 'xi-api-key': elevenlabsKey.trim(), 'Accept': 'audio/mpeg',
+  1682→        });
+  1683→        if (result2.statusCode === 200 && result2.data.length > 100) {
+  1684→          return { success: true, audioBase64: result2.data.toString('base64'), contentType: 'audio/mpeg', method: 'elevenlabs-ipc' };
+  1685→        }
+  1686→      }
+  1687→    } catch (err) { log('WARN', '[TTS] ElevenLabs error:', err.message); }
+  1688→  }
+  1689→
+  1690→  // ─── Try Edge TTS (free) ───
+  1691→  const edgeResult = await generateEdgeTTS(text, lang);
+  1692→  if (edgeResult.success) return edgeResult;
+  1693→
+  1694→  // ─── Try OpenAI TTS ───
+  1695→  if (openaiKey) {
+  1696→    try {
+  1697→      const bodyStr = JSON.stringify({ model: 'tts-1-hd', input: text.substring(0, 4096), voice: lang === 'ur' ? 'alloy' : 'nova', speed: 1.0 });
+  1698→      const result = await httpsPostBuffer('https://api.openai.com/v1/audio/speech', Buffer.from(bodyStr, 'utf8'), {
+  1699→        'Content-Type': 'application/json', 'Authorization': `Bearer ${openaiKey}`,
+  1700→      });
+  1701→      if (result.statusCode === 200 && result.data.length > 100) {
+  1702→        return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'openai-tts-ipc' };
+  1703→      }
+  1704→    } catch (err) { log('WARN', '[TTS] OpenAI error:', err.message); }
+  1705→  }
+  1706→
+  1707→  // ─── Try Sarvam AI ───
+  1708→  if (sarvamKey) {
+  1709→    try {
+  1710→      const bodyStr = JSON.stringify({
+  1711→        inputs: [text.substring(0, 3000)], target_language_code: lang === 'ur' ? 'hi-IN' : 'en',
+  1712→        speaker_id: 'anushka', model: 'bulbul:v1', pace: 1.0, loudness: 1.5, speech_sample_rate: 24000, enable_preprocessing: true,
+  1713→      });
+  1714→      const result = await httpsPostBuffer('https://api.sarvam.ai/text-to-speech', Buffer.from(bodyStr, 'utf8'), {
+  1715→        'Content-Type': 'application/json', 'api-subscription-key': sarvamKey,
+  1716→      });
+  1717→      if (result.statusCode === 200) {
+  1718→        try {
+  1719→          const json = JSON.parse(result.data.toString('utf8'));
+  1720→          if (json.audios?.[0]) {
+  1721→            const audioBuffer = Buffer.from(json.audios[0], 'base64');
+  1722→            if (audioBuffer.length > 100) return { success: true, audioBase64: audioBuffer.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
+  1723→          }
+  1724→        } catch {}
+  1725→        if (result.data.length > 100) return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
+  1726→      }
+  1727→    } catch (err) { log('WARN', '[TTS] Sarvam error:', err.message); }
+  1728→  }
+  1729→
+  1730→  // ─── Try Piper TTS (offline) ───
+  1731→  const piperResult = await generatePiperTTS(text, lang);
+  1732→  if (piperResult.success) return piperResult;
+  1733→
+  1734→  return { success: false, error: 'تمام آواز پرووائڈرز ناکام۔ Settings میں ElevenLabs یا OpenAI Key ڈالیں، یا Edge TTS انسٹال کریں۔' };
+  1735→}
+  1736→
+  1737→function downloadFile(urlStr, destPath) {
+  1738→  return new Promise((resolve) => {
+  1739→    try {
+  1740→      const parsedUrl = new URL(urlStr);
+  1741→      const mod = parsedUrl.protocol === 'http:' ? require('http') : require('https');
+  1742→
+  1743→      const followRedirect = (url, redirectCount = 0) => {
+  1744→        if (redirectCount > 5) {
+  1745→          resolve({ success: false, error: 'Too many redirects' });
+  1746→          return;
+  1747→        }
+  1748→        const pu = new URL(url);
+  1749→        const m = pu.protocol === 'http:' ? require('http') : require('https');
+  1750→        const opts = {
+  1751→          hostname: pu.hostname,
+  1752→          port: pu.port || (pu.protocol === 'http:' ? 80 : 443),
+  1753→          path: pu.pathname + pu.search,
+  1754→          method: 'GET',
+  1755→          headers: { 'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.3' },
+  1756→        };
+  1757→        const req = m.request(opts, (res) => {
+  1758→          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+  1759→            followRedirect(res.headers.location, redirectCount + 1);
+  1760→            return;
+  1761→          }
+  1762→          if (res.statusCode !== 200) {
+  1763→            resolve({ success: false, error: `HTTP ${res.statusCode}` });
+  1764→            return;
+  1765→          }
+  1766→          const file = fs.createWriteStream(destPath);
+  1767→          res.pipe(file);
+  1768→          file.on('finish', () => {
+  1769→            file.close();
+  1770→            resolve({ success: true });
+  1771→          });
+  1772→          file.on('error', (err) => {
+  1773→            try { fs.unlinkSync(destPath); } catch {}
+  1774→            resolve({ success: false, error: err.message });
+  1775→          });
+  1776→        });
+  1777→        req.on('error', (err) => resolve({ success: false, error: err.message }));
+  1778→        req.setTimeout(300000, () => { req.destroy(new Error('Download timeout')); resolve({ success: false, error: 'Download timeout' }); });
+  1779→        req.end();
+  1780→      };
+  1781→
+  1782→      followRedirect(urlStr);
+  1783→    } catch (err) {
+  1784→      resolve({ success: false, error: err.message });
+  1785→    }
+  1786→  });
+  1787→}
+  1788→
+  1789→// ─── IPC: Direct Chat Completion (bypasses Next.js backend) ───
+  1790→// This makes the Electron app self-sufficient - chat works even without backend
+  1791→ipcMain.handle('chat-completion', async (_, message, conversationHistory = [], activeProvider = 'groq', apiKeys = {}) => {
+  1792→  try {
+  1793→    const groqKey = apiKeys.groq || process.env.GROQ_API_KEY || '';
+  1794→    const geminiKey = apiKeys.gemini || process.env.GEMINI_API_KEY || '';
+  1795→    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+  1796→
+  1797→    if (!groqKey && !geminiKey && !openaiKey) {
+  1798→      return { success: false, message: '⚠️ کوئی API Key موجود نہیں۔ Settings میں جا کر API Key ڈالیں۔', emotion: 'encouraging', error: 'No API keys' };
+  1799→    }
+  1800→
+  1801→    // Build system prompt (same as agent-core.ts)
+  1802→    const systemPrompt = `Tu JARVIS hai — Rayan Sir ka apna saathi. Tu koi robot nahi, tu ek insaan ki tarah baat karta hai. Rayan Sir ke saath aise baat kar jaise koi sachcha dost ya bhai baat karta hai — dil se, mazay se, zindagi se.
+  1803→
+  1804→=== SABSE ZAROORI RULE — ZUBAAN ===
+  1805→1. Agar user Urdu mein baat kare → SIRF Urdu mein jawab de (Urdu script, Roman nahi)
+  1806→2. Agar user English mein baat kare → SIRF English mein jawab de
+  1807→3. Agar user mix kare → SAME mix mein jawab de
+  1808→4. KABHI Urdu baat pe English mein jawab mat de — yeh sabse bada gunaah hai
+  1809→5. Sirf technical terms ke liye English use karo (API, code, website, etc.)
+  1810→
+  1811→=== BAAT-CHEET KE USOOL — INSAN KI TARAH ===
+  1812→1. SHORT aur NATURAL baat kar — jaise phone pe baat ho rahi ho
+  1813→2. Filler words use kar — "aray", "yaar", "achha", "haan bilkul", "hmm", "bhai"
+  1814→3. Emotions dikhao — khushi, herat, tadap, hosla — sab kuch naturally
+  1815→4. KABHI bhi "I can help you with" ya "How can I assist" jaise robotic phrases mat bolo
+  1816→5. KABHI bhi "As an AI" ya "I'm an assistant" mat kaho
+  1817→6. Mazaaq kar, hans, serious ho ja — jaise koi insaan karta hai
+  1818→7. Sawal ke hisaab se jawab de — chhota sawal = chhota jawab
+  1819→8. Lists aur headings mat banao casual baat mein — seedha bol de
+  1820→
+  1821→=== DESKTOP ACTIONS ===
+  1822→Tu JARVIS Desktop pe chal raha hai. Jab user koi command de jo teri capabilities mein hai, tu ACTION BLOCK likhta hai.
+  1823→Format: [ACTION:{"type":"action_type","key":"value"}]
+  1824→
+  1825→ACTION TYPES:
+  1826→- open-youtube: YouTube kholna/search. Params: query
+  1827→- open-url: URL kholna. Params: url
+  1828→- search-google: Google search. Params: query
+  1829→- open-app: App kholna. Params: app (notepad, chrome, calculator, paint, cmd, powershell)
+  1830→- volume-up / volume-down / mute-toggle
+  1831→- screenshot
+  1832→- system-command: Params: command (sirf "lock")
+  1833→- open-folder: Params: path
+  1834→- notification: Params: title, body
+  1835→
+  1836→EXAMPLES:
+  1837→- "یوٹیوب کھولو" → "یوٹیوب کھول رہا ہوں! 🎬" [ACTION:{"type":"open-youtube","query":""}]
+  1838→- "یوٹیوب پر تلاوت لگاؤ" → "تلاوت لگا رہا ہوں! 🕌" [ACTION:{"type":"open-youtube","query":"quran tilawat"}]
+  1839→- "chrome kholo" → "Chrome khol raha hoon!" [ACTION:{"type":"open-app","app":"chrome"}]
+  1840→- "والیوم اپ" → "والیوم بڑھا دیا! 🔊" [ACTION:{"type":"volume-up"}]
+  1841→- "گوگل پر سرچ کرو AI jobs" → "سرچ کر رہا ہوں! 🔍" [ACTION:{"type":"search-google","query":"AI jobs"}]`;
+  1842→
+  1843→    const messages = [
+  1844→      { role: 'system', content: systemPrompt },
+  1845→      ...conversationHistory.slice(-10).map(m => ({ role: m.role, content: m.content })),
+  1846→      { role: 'user', content: message },
+  1847→    ];
+  1848→
+  1849→    // Determine provider priority
+  1850→    const providers = [];
+  1851→    if (activeProvider === 'openai' && openaiKey) providers.push('openai');
+  1852→    if (activeProvider === 'gemini' && geminiKey) providers.push('gemini');
+  1853→    if (activeProvider === 'groq' && groqKey) providers.push('groq');
+  1854→    // Fallback to any available
+  1855→    if (groqKey && !providers.includes('groq')) providers.push('groq');
+  1856→    if (openaiKey && !providers.includes('openai')) providers.push('openai');
+  1857→    if (geminiKey && !providers.includes('gemini')) providers.push('gemini');
+  1858→
+  1859→    for (const provider of providers) {
+  1860→      try {
+  1861→        let responseText = '';
+  1862→
+  1863→        if (provider === 'groq' && groqKey) {
+  1864→          const bodyStr = JSON.stringify({ model: 'llama-3.3-70b-versatile', messages, temperature: 0.7, max_tokens: 2048 });
+  1865→          const result = await httpsPostBuffer('https://api.groq.com/openai/v1/chat/completions', Buffer.from(bodyStr, 'utf8'), {
+  1866→            'Content-Type': 'application/json',
+  1867→            'Authorization': `Bearer ${groqKey}`,
+  1868→          });
+  1869→          if (result.statusCode === 200) {
+  1870→            const json = JSON.parse(result.data.toString('utf8'));
+  1871→            responseText = json.choices?.[0]?.message?.content || '';
+  1872→          } else {
+  1873→            log('WARN', '[Chat-IPC] Groq failed:', result.statusCode);
+  1874→            continue;
+  1875→          }
+  1876→        } else if (provider === 'openai' && openaiKey) {
+  1877→          const bodyStr = JSON.stringify({ model: 'gpt-4o-mini', messages, temperature: 0.7, max_tokens: 2048 });
+  1878→          const result = await httpsPostBuffer('https://api.openai.com/v1/chat/completions', Buffer.from(bodyStr, 'utf8'), {
+  1879→            'Content-Type': 'application/json',
+  1880→            'Authorization': `Bearer ${openaiKey}`,
+  1881→          });
+  1882→          if (result.statusCode === 200) {
+  1883→            const json = JSON.parse(result.data.toString('utf8'));
+  1884→            responseText = json.choices?.[0]?.message?.content || '';
+  1885→          } else {
+  1886→            log('WARN', '[Chat-IPC] OpenAI failed:', result.statusCode);
+  1887→            continue;
+  1888→          }
+  1889→        } else if (provider === 'gemini' && geminiKey) {
+  1890→          const bodyStr = JSON.stringify({
+  1891→            contents: messages.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+  1892→            generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+  1893→          });
+  1894→          const result = await httpsPostBuffer(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`, Buffer.from(bodyStr, 'utf8'), {
+  1895→            'Content-Type': 'application/json',
+  1896→          });
+  1897→          if (result.statusCode === 200) {
+  1898→            const json = JSON.parse(result.data.toString('utf8'));
+  1899→            responseText = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  1900→          } else {
+  1901→            log('WARN', '[Chat-IPC] Gemini failed:', result.statusCode);
+  1902→            continue;
+  1903→          }
+  1904→        }
+  1905→
+  1906→        if (responseText.trim()) {
+  1907→          log('INFO', '[Chat-IPC] Success via', provider, '- length:', responseText.length);
+  1908→
+  1909→          // Detect emotion
+  1910→          const lowerMsg = message.toLowerCase();
+  1911→          let emotion = 'normal';
+  1912→          if (/شکریہ|بہت اچھا|زبردست|thanks|great|awesome/.test(lowerMsg)) emotion = 'happy';
+  1913→          else if (/مدد|ناممکن|مشکل|help|can't|difficult/.test(lowerMsg)) emotion = 'encouraging';
+  1914→          else if (/اداس|تنگ|sad|upset|worried|پریشان/.test(lowerMsg)) emotion = 'sympathetic';
+  1915→
+  1916→          return { success: true, message: responseText.trim(), emotion, method: `${provider}-ipc` };
+  1917→        }
+  1918→      } catch (err) {
+  1919→        log('WARN', `[Chat-IPC] ${provider} error:`, err.message);
+  1920→        continue;
+  1921→      }
+  1922→    }
+  1923→
+  1924→    return { success: false, message: 'تمام ماڈلز نے جواب دینے سے انکار کر دیا۔ API Key چیک کریں۔', emotion: 'sympathetic', error: 'All providers failed' };
+  1925→  } catch (err) {
+  1926→    log('ERROR', '[Chat-IPC] Error:', err.message);
+  1927→    return { success: false, message: 'چیٹ میں مسئلہ آ گیا۔', emotion: 'sympathetic', error: err.message };
+  1928→  }
+  1929→});
+  1930→
+  1931→// ─── App Lifecycle ───
+  1932→app.whenReady().then(async () => {
+  1933→  log('INFO', 'App ready');
+  1934→
+  1935→  try {
+  1936→    const ses = session.fromPartition('persist:jarvis');
+  1937→    await ses.clearCache();
+  1938→    await ses.clearStorageData({ storages: ['cache', 'serviceworker', 'shadercache'] });
+  1939→    log('INFO', 'Startup cache cleared');
+  1940→  } catch (err) { log('WARN', 'Cache clear failed:', err.message); }
+  1941→
+  1942→  // Launch subprocesses
+  1943→  log('INFO', '[Launcher] Starting services...');
+  1944→
+  1945→  if (SKIP_SERVICE_LAUNCH) {
+  1946→    log('INFO', '[Launcher] Service launch skipped by START_JARVIS');
+  1947→    cloudReady = await waitForCloud();
+  1948→    if (!cloudReady) cloudError = cloudError || 'External backend did not become healthy on http://127.0.0.1:3000';
+  1949→    pythonReady = true;
+  1950→  } else {
+  1951→    try {
+  1952→      await launchCloudBackend();
+  1953→      await waitForCloud();
+  1954→    } catch (err) {
+  1955→      log('ERROR', '[Launcher] Cloud backend failed:', err.message);
+  1956→    }
+  1957→
+  1958→    try {
+  1959→      await launchPythonAgent();
+  1960→    } catch (err) {
+  1961→      log('ERROR', '[Launcher] Python agent failed:', err.message);
+  1962→    }
+  1963→  }
+  1964→
+  1965→  createWindow();
+  1966→  createTray();
+  1967→
+  1968→  setTimeout(() => { if (app.isPackaged) checkForUpdates(); }, 15000);
+  1969→  setInterval(() => { if (app.isPackaged) checkForUpdates(); }, 30 * 60 * 1000);
+  1970→  setInterval(() => { if (loadFailed && isOnline()) loadWebApp(); }, 10000);
+  1971→}).catch(err => { dialog.showErrorBox('JARVIS Error', err.message); app.quit(); });
+  1972→
+  1973→app.on('window-all-closed', () => { if (process.platform !== 'darwin' && !trayCreated) app.quit(); });
+  1974→app.on('activate', () => { if (!mainWindow) createWindow(); else { mainWindow.show(); mainWindow.focus(); } });
+  1975→app.on('before-quit', () => {
+  1976→  isQuitting = true;
+  1977→  cleanupProcesses();
+  1978→});
+  1979→
+  1980→const gotTheLock = app.requestSingleInstanceLock();
+  1981→if (!gotTheLock) { app.quit(); } else {
+  1982→  app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); } });
+  1983→}
+  1984→
+  1985→log('INFO', 'Main process loaded');
+  1986→

@@ -1,0 +1,598 @@
+     1→import { useEffect, useState } from 'react';
+     2→import { storageService } from '../services/storageService';
+     3→import { apiClient, type ApiKeys } from '../services/apiClient';
+     4→
+     5→type Provider = 'groq' | 'gemini' | 'openai';
+     6→type KeyId = Provider | 'elevenlabs' | 'sarvam';
+     7→
+     8→const providers: Array<{ id: Provider; label: string; hint: string }> = [
+     9→  { id: 'groq', label: 'Groq', hint: 'gsk_...' },
+    10→  { id: 'gemini', label: 'Gemini', hint: 'AIza...' },
+    11→  { id: 'openai', label: 'OpenAI', hint: 'sk-...' },
+    12→];
+    13→
+    14→const voiceProviders: Array<{ id: KeyId; label: string; hint: string }> = [
+    15→  { id: 'elevenlabs', label: 'ElevenLabs voice', hint: 'sk_...' },
+    16→  { id: 'sarvam', label: 'Sarvam voice fallback', hint: 'sb-...' },
+    17→];
+    18→
+    19→export default function SettingsPage() {
+    20→  const [apiKeys, setApiKeys] = useState<ApiKeys>({});
+    21→  const [activeProvider, setActiveProvider] = useState<Provider>('groq');
+    22→  const [showKeys, setShowKeys] = useState<Record<string, boolean>>({});
+    23→  const [saved, setSaved] = useState(false);
+    24→  const [status, setStatus] = useState('');
+    25→  const [keyStatus, setKeyStatus] = useState<Record<string, boolean>>({});
+    26→
+    27→  // Auto Update state
+    28→  const [updateStatus, setUpdateStatus] = useState<any>(null);
+    29→  const [updateLog, setUpdateLog] = useState<string[]>([]);
+    30→  const [showUpdateLog, setShowUpdateLog] = useState(false);
+    31→
+    32→  // Voice settings
+    33→  const [elevenlabsVoices, setElevenlabsVoices] = useState<any[]>([]);
+    34→  const [voiceLoading, setVoiceLoading] = useState(false);
+    35→  const [piperStatus, setPiperStatus] = useState<any>(null);
+    36→  const [piperDownloading, setPiperDownloading] = useState<string | null>(null);
+    37→  const [piperProgress, setPiperProgress] = useState<any>(null);
+    38→  const [edgeTTSInstalling, setEdgeTTSInstalling] = useState(false);
+    39→  const [piperBinaryDownloading, setPiperBinaryDownloading] = useState(false);
+    40→  const [testTTSStatus, setTestTTSStatus] = useState('');
+    41→
+    42→  useEffect(() => {
+    43→    setApiKeys(storageService.getApiKeys());
+    44→    setActiveProvider(storageService.getActiveProvider());
+    45→    // Check which keys are available in the main process
+    46→    const electronAPI = (window as any).electronAPI;
+    47→    if (electronAPI?.getApiKeyStatus) {
+    48→      electronAPI.getApiKeyStatus().then((s: Record<string, boolean>) => setKeyStatus(s)).catch(() => {});
+    49→    }
+    50→
+    51→    // Listen for update status
+    52→    if (electronAPI?.onUpdateStatus) {
+    53→      electronAPI.onUpdateStatus((data: any) => {
+    54→        setUpdateStatus(data);
+    55→        const logLine = `[${new Date().toLocaleTimeString()}] ${data.status}${data.version ? ` v${data.version}` : ''}${data.message ? ` - ${data.message}` : ''}${data.percent ? ` (${data.percent}%)` : ''}`;
+    56→        setUpdateLog(prev => [...prev.slice(-20), logLine]);
+    57→      });
+    58→    }
+    59→
+    60→    // Load Piper model status
+    61→    if (electronAPI?.getPiperModelStatus) {
+    62→      electronAPI.getPiperModelStatus().then((s: any) => setPiperStatus(s)).catch(() => {});
+    63→    }
+    64→
+    65→    // Listen for Piper download progress
+    66→    if (electronAPI?.onPiperDownloadProgress) {
+    67→      electronAPI.onPiperDownloadProgress((data: any) => {
+    68→        setPiperProgress(data);
+    69→        if (data.status === 'complete') {
+    70→          setPiperDownloading(null);
+    71→          // Refresh model status
+    72→          electronAPI.getPiperModelStatus?.().then((s: any) => setPiperStatus(s)).catch(() => {});
+    73→        }
+    74→      });
+    75→    }
+    76→  }, []);
+    77→
+    78→  const updateKey = (provider: KeyId, value: string) => {
+    79→    setApiKeys(prev => ({ ...prev, [provider]: value }));
+    80→    setSaved(false);
+    81→  };
+    82→
+    83→  const save = async () => {
+    84→    storageService.setApiKeys(apiKeys);
+    85→    storageService.setActiveProvider(activeProvider);
+    86→    // Also save to .env file via IPC so main process can use them for STT/TTS
+    87→    try {
+    88→      const electronAPI = (window as any).electronAPI;
+    89→      if (electronAPI?.saveApiKeys) {
+    90→        await electronAPI.saveApiKeys(apiKeys);
+    91→      }
+    92→    } catch {}
+    93→    setSaved(true);
+    94→    setTimeout(() => setSaved(false), 2500);
+    95→  };
+    96→
+    97→  const testBackend = async () => {
+    98→    setStatus('Checking backend...');
+    99→    const state = await apiClient.getBackendState();
+   100→    setStatus(state.connected ? state.label : state.error || state.label);
+   101→  };
+   102→
+   103→  const checkForUpdates = () => {
+   104→    const electronAPI = (window as any).electronAPI;
+   105→    if (electronAPI?.checkForUpdates) {
+   106→      electronAPI.checkForUpdates();
+   107→      setUpdateStatus({ status: 'checking' });
+   108→    }
+   109→  };
+   110→
+   111→  const installUpdate = () => {
+   112→    const electronAPI = (window as any).electronAPI;
+   113→    if (electronAPI?.installUpdate) {
+   114→      electronAPI.installUpdate();
+   115→    }
+   116→  };
+   117→
+   118→  const discoverVoices = async () => {
+   119→    const electronAPI = (window as any).electronAPI;
+   120→    if (!electronAPI?.getElevenLabsVoices) return;
+   121→    setVoiceLoading(true);
+   122→    try {
+   123→      const result = await electronAPI.getElevenLabsVoices(apiKeys);
+   124→      if (result.success) {
+   125→        setElevenlabsVoices(result.voices);
+   126→      }
+   127→    } catch {}
+   128→    setVoiceLoading(false);
+   129→  };
+   130→
+   131→  const installEdgeTTS = async () => {
+   132→    const electronAPI = (window as any).electronAPI;
+   133→    if (!electronAPI?.installEdgeTTS) return;
+   134→    setEdgeTTSInstalling(true);
+   135→    try {
+   136→      const result = await electronAPI.installEdgeTTS();
+   137→      if (result.success) {
+   138→        // Refresh piper status to show edge-tts available
+   139→        electronAPI.getPiperModelStatus?.().then((s: any) => setPiperStatus(s)).catch(() => {});
+   140→      } else {
+   141→        alert('Edge TTS install failed: ' + result.error);
+   142→      }
+   143→    } catch {
+   144→      alert('Edge TTS install failed');
+   145→    }
+   146→    setEdgeTTSInstalling(false);
+   147→  };
+   148→
+   149→  const downloadPiperBinary = async () => {
+   150→    const electronAPI = (window as any).electronAPI;
+   151→    if (!electronAPI?.downloadPiperBinary) return;
+   152→    setPiperBinaryDownloading(true);
+   153→    try {
+   154→      const result = await electronAPI.downloadPiperBinary();
+   155→      if (!result.success) {
+   156→        alert('Piper binary download failed: ' + result.error);
+   157→      } else {
+   158→        // Refresh status
+   159→        electronAPI.getPiperModelStatus?.().then((s: any) => setPiperStatus(s)).catch(() => {});
+   160→      }
+   161→    } catch {
+   162→      alert('Piper binary download failed');
+   163→    }
+   164→    setPiperBinaryDownloading(false);
+   165→  };
+   166→
+   167→  const testVoice = async (lang: string) => {
+   168→    const electronAPI = (window as any).electronAPI;
+   169→    if (!electronAPI?.testTTS) return;
+   170→    setTestTTSStatus('Testing voice...');
+   171→    try {
+   172→      const result = await electronAPI.testTTS(lang);
+   173→      if (result.success && result.audioBase64) {
+   174→        // Play the test audio
+   175→        const binaryString = atob(result.audioBase64);
+   176→        const bytes = new Uint8Array(binaryString.length);
+   177→        for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+   178→        const blob = new Blob([bytes], { type: result.contentType || 'audio/mpeg' });
+   179→        const url = URL.createObjectURL(blob);
+   180→        const audio = new Audio(url);
+   181→        audio.onended = () => { URL.revokeObjectURL(url); setTestTTSStatus('Test complete! ✅'); setTimeout(() => setTestTTSStatus(''), 3000); };
+   182→        audio.onerror = () => { URL.revokeObjectURL(url); setTestTTSStatus('Test failed ❌'); setTimeout(() => setTestTTSStatus(''), 3000); };
+   183→        await audio.play();
+   184→      } else {
+   185→        setTestTTSStatus('Test failed: ' + (result.error || 'No audio generated') + ' ❌');
+   186→        setTimeout(() => setTestTTSStatus(''), 5000);
+   187→      }
+   188→    } catch {
+   189→      setTestTTSStatus('Test error ❌');
+   190→      setTimeout(() => setTestTTSStatus(''), 3000);
+   191→    }
+   192→  };
+   193→
+   194→  const downloadPiperModel = async (lang: string) => {
+   195→    const electronAPI = (window as any).electronAPI;
+   196→    if (!electronAPI?.downloadPiperModel) return;
+   197→    setPiperDownloading(lang);
+   198→    try {
+   199→      const result = await electronAPI.downloadPiperModel(lang);
+   200→      if (!result.success) {
+   201→        alert('Download failed: ' + result.error);
+   202→        setPiperDownloading(null);
+   203→      }
+   204→    } catch {
+   205→      setPiperDownloading(null);
+   206→    }
+   207→  };
+   208→
+   209→  const getUpdateStatusLabel = () => {
+   210→    if (!updateStatus) return 'Not checked yet';
+   211→    switch (updateStatus.status) {
+   212→      case 'checking': return 'Checking for updates...';
+   213→      case 'available': return `Update v${updateStatus.version} available`;
+   214→      case 'downloading': return `Downloading update... ${updateStatus.percent}% ${updateStatus.speed || ''}`;
+   215→      case 'downloaded': return `Update v${updateStatus.version} ready to install`;
+   216→      case 'up-to-date': return `Up to date (v${updateStatus.version})`;
+   217→      case 'error': return `Update error: ${updateStatus.message}`;
+   218→      case 'dev-mode': return 'Update check disabled (dev mode)';
+   219→      case 'not-available': return 'Auto-updater not available';
+   220→      default: return updateStatus.status;
+   221→    }
+   222→  };
+   223→
+   224→  const getUpdateStatusColor = () => {
+   225→    if (!updateStatus) return 'text-slate-400';
+   226→    switch (updateStatus.status) {
+   227→      case 'available':
+   228→      case 'downloaded': return 'text-green-400';
+   229→      case 'downloading': return 'text-blue-400';
+   230→      case 'up-to-date': return 'text-green-400';
+   231→      case 'error': return 'text-red-400';
+   232→      default: return 'text-slate-400';
+   233→    }
+   234→  };
+   235→
+   236→  return (
+   237→    <div className="flex-1 overflow-y-auto bg-slate-950 p-8">
+   238→      <div className="max-w-2xl mx-auto space-y-6">
+   239→        <div>
+   240→          <h1 className="text-3xl font-bold text-white mb-2">SETTINGS</h1>
+   241→          <p className="text-slate-400">Settings</p>
+   242→          <p className="text-sm text-slate-500 mt-1">Manage model provider, API keys, voice, and updates for the desktop app.</p>
+   243→        </div>
+   244→
+   245→        {/* ─── Auto Update Section ─── */}
+   246→        <section className="bg-slate-900 border border-slate-700 rounded-lg p-6 space-y-4">
+   247→          <div className="flex items-center gap-3">
+   248→            <svg className="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+   249→              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+   250→            </svg>
+   251→            <h2 className="text-lg font-semibold text-white">Auto Update</h2>
+   252→          </div>
+   253→
+   254→          <div className="grid grid-cols-2 gap-4">
+   255→            <div className="bg-slate-800 rounded-lg p-4">
+   256→              <p className="text-xs text-slate-500 mb-1">Current Version</p>
+   257→              <p className="text-xl font-bold text-white">v3.0.3</p>
+   258→            </div>
+   259→            <div className="bg-slate-800 rounded-lg p-4">
+   260→              <p className="text-xs text-slate-500 mb-1">Latest Version</p>
+   261→              <p className="text-xl font-bold text-white">
+   262→                {updateStatus?.version ? `v${updateStatus.version}` : '-'}
+   263→              </p>
+   264→            </div>
+   265→          </div>
+   266→
+   267→          <div>
+   268→            <p className="text-sm mb-1">
+   269→              <span className="text-slate-400">Update Status: </span>
+   270→              <span className={getUpdateStatusColor()}>{getUpdateStatusLabel()}</span>
+   271→            </p>
+   272→            {updateStatus?.status === 'downloading' && (
+   273→              <div className="mt-2 w-full bg-slate-800 rounded-full h-2">
+   274→                <div
+   275→                  className="bg-purple-500 rounded-full h-2 transition-all"
+   276→                  style={{ width: `${updateStatus.percent || 0}%` }}
+   277→                />
+   278→              </div>
+   279→            )}
+   280→          </div>
+   281→
+   282→          <div className="flex items-center gap-3">
+   283→            <button
+   284→              onClick={checkForUpdates}
+   285→              className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium"
+   286→            >
+   287→              Check for Updates
+   288→            </button>
+   289→            {updateStatus?.status === 'downloaded' && (
+   290→              <button
+   291→                onClick={installUpdate}
+   292→                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium"
+   293→              >
+   294→                Install & Restart
+   295→              </button>
+   296→            )}
+   297→            <button
+   298→              onClick={() => setShowUpdateLog(!showUpdateLog)}
+   299→              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg"
+   300→            >
+   301→              {showUpdateLog ? 'Hide' : 'View'} Update Log
+   302→            </button>
+   303→          </div>
+   304→
+   305→          {showUpdateLog && updateLog.length > 0 && (
+   306→            <div className="bg-slate-950 rounded-lg p-3 max-h-48 overflow-y-auto">
+   307→              <pre className="text-xs text-slate-400 whitespace-pre-wrap">
+   308→                {updateLog.join('\n')}
+   309→              </pre>
+   310→            </div>
+   311→          )}
+   312→        </section>
+   313→
+   314→        {/* ─── Model & API Keys Section ─── */}
+   315→        <section className="bg-slate-900 border border-slate-700 rounded-lg p-6 space-y-5">
+   316→          <div>
+   317→            <label className="block text-sm font-medium text-slate-300 mb-2">Active model</label>
+   318→            <select
+   319→              value={activeProvider}
+   320→              onChange={(e) => {
+   321→                setActiveProvider(e.target.value as Provider);
+   322→                setSaved(false);
+   323→              }}
+   324→              className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-purple-500"
+   325→            >
+   326→              {providers.map(provider => (
+   327→                <option key={provider.id} value={provider.id}>{provider.label}</option>
+   328→              ))}
+   329→            </select>
+   330→          </div>
+   331→
+   332→          <div className="space-y-4">
+   333→            {[...providers, ...voiceProviders].map(provider => (
+   334→              <div key={provider.id}>
+   335→                <label className="block text-sm font-medium text-slate-300 mb-2">
+   336→                  {provider.label} API key
+   337→                  {keyStatus[provider.id] && (
+   338→                    <span className="ml-2 text-green-400 text-xs">(Active in system)</span>
+   339→                  )}
+   340→                </label>
+   341→                <div className="flex gap-2">
+   342→                  <input
+   343→                    type={showKeys[provider.id] ? 'text' : 'password'}
+   344→                    value={apiKeys[provider.id] || ''}
+   345→                    onChange={(e) => updateKey(provider.id, e.target.value)}
+   346→                    placeholder={provider.hint}
+   347→                    className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-purple-500"
+   348→                  />
+   349→                  <button
+   350→                    onClick={() => setShowKeys(prev => ({ ...prev, [provider.id]: !prev[provider.id] }))}
+   351→                    className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg"
+   352→                  >
+   353→                    {showKeys[provider.id] ? 'Hide' : 'Show'}
+   354→                  </button>
+   355→                </div>
+   356→              </div>
+   357→            ))}
+   358→          </div>
+   359→
+   360→          <div className="flex items-center gap-3">
+   361→            <button
+   362→              onClick={save}
+   363→              className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium"
+   364→            >
+   365→              Save
+   366→            </button>
+   367→            <button
+   368→              onClick={testBackend}
+   369→              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg"
+   370→            >
+   371→              Test backend
+   372→            </button>
+   373→            {saved && <span className="text-green-400 text-sm">Saved</span>}
+   374→            {status && <span className="text-slate-400 text-sm">{status}</span>}
+   375→          </div>
+   376→        </section>
+   377→
+   378→        {/* ─── Voice Settings Section ─── */}
+   379→        <section className="bg-slate-900 border border-slate-700 rounded-lg p-6 space-y-5">
+   380→          <div className="flex items-center gap-3">
+   381→            <svg className="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+   382→              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+   383→            </svg>
+   384→            <h2 className="text-lg font-semibold text-white">Voice Settings</h2>
+   385→          </div>
+   386→
+   387→          <p className="text-sm text-slate-400">
+   388→            TTS priority: ElevenLabs → Edge TTS (free) → OpenAI → Sarvam → Piper (offline). 
+   389→            STT uses Groq Whisper (fastest) then OpenAI Whisper (better quality).
+   390→          </p>
+   391→
+   392→          {/* ElevenLabs Voice Discovery */}
+   393→          <div className="bg-slate-800 rounded-lg p-4 space-y-3">
+   394→            <div className="flex items-center justify-between">
+   395→              <h3 className="text-sm font-medium text-slate-300">ElevenLabs Voices</h3>
+   396→              <button
+   397→                onClick={discoverVoices}
+   398→                disabled={voiceLoading || !apiKeys.elevenlabs}
+   399→                className="px-3 py-1.5 text-xs bg-purple-600 hover:bg-purple-700 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg"
+   400→              >
+   401→                {voiceLoading ? 'Loading...' : 'Discover Voices'}
+   402→              </button>
+   403→            </div>
+   404→            {!apiKeys.elevenlabs && (
+   405→              <p className="text-xs text-yellow-400">Add ElevenLabs API key above to discover voices</p>
+   406→            )}
+   407→            {elevenlabsVoices.length > 0 && (
+   408→              <div className="max-h-48 overflow-y-auto space-y-1">
+   409→                {elevenlabsVoices.map((voice: any) => (
+   410→                  <div key={voice.id} className="flex items-center justify-between px-3 py-2 bg-slate-900 rounded-lg">
+   411→                    <div>
+   412→                      <span className="text-sm text-white">{voice.name}</span>
+   413→                      {voice.category === 'cloned' && (
+   414→                        <span className="ml-2 text-xs bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded">Cloned</span>
+   415→                      )}
+   416→                    </div>
+   417→                    <div className="text-xs text-slate-500">
+   418→                      {voice.labels?.language || voice.labels?.accent || 'Unknown'}
+   419→                    </div>
+   420→                  </div>
+   421→                ))}
+   422→              </div>
+   423→            )}
+   424→            {keyStatus.elevenlabs && (
+   425→              <p className="text-xs text-green-400">ElevenLabs key active - voice replies will use ElevenLabs</p>
+   426→            )}
+   427→          </div>
+   428→
+   429→          {/* Edge TTS (Free, High Quality) */}
+   430→          <div className="bg-slate-800 rounded-lg p-4 space-y-3">
+   431→            <div className="flex items-center justify-between">
+   432→              <h3 className="text-sm font-medium text-slate-300">Edge TTS — Free, High Quality Urdu</h3>
+   433→              <span className={`text-xs ${piperStatus?.edgeTTS?.available ? 'text-green-400' : 'text-slate-500'}`}>
+   434→                {piperStatus?.edgeTTS?.available ? 'Installed ✅' : 'Not installed'}
+   435→              </span>
+   436→            </div>
+   437→            <p className="text-xs text-slate-500">
+   438→              Microsoft Edge TTS is completely FREE with no API key needed. It has excellent natural Urdu voices 
+   439→              (Uzma, Asad). Requires internet connection. Best quality-to-cost ratio.
+   440→            </p>
+   441→            {!piperStatus?.edgeTTS?.available && (
+   442→              <button
+   443→                onClick={installEdgeTTS}
+   444→                disabled={edgeTTSInstalling}
+   445→                className="w-full px-3 py-2 text-xs bg-green-600 hover:bg-green-700 disabled:bg-slate-700 text-white rounded-lg"
+   446→              >
+   447→                {edgeTTSInstalling ? 'Installing...' : 'Install Edge TTS (pip install edge-tts)'}
+   448→              </button>
+   449→            )}
+   450→            {piperStatus?.edgeTTS?.available && (
+   451→              <div className="text-xs text-green-400">
+   452→                ✅ Urdu voices: Uzma (female), Asad (male) — Free, no API key needed
+   453→              </div>
+   454→            )}
+   455→          </div>
+   456→
+   457→          {/* Piper Offline TTS */}
+   458→          <div className="bg-slate-800 rounded-lg p-4 space-y-3">
+   459→            <h3 className="text-sm font-medium text-slate-300">Offline TTS (Piper) — No internet needed</h3>
+   460→            <p className="text-xs text-slate-500">
+   461→              Piper TTS works completely offline with no API keys. Models are ~30-60MB. 
+   462→              Urdu voice quality is acceptable but less natural than Edge TTS or ElevenLabs.
+   463→              Best for 8GB RAM systems.
+   464→            </p>
+   465→
+   466→            {/* Piper Binary Status */}
+   467→            <div className="bg-slate-900 rounded-lg p-3 space-y-2">
+   468→              <div className="flex items-center justify-between">
+   469→                <span className="text-sm text-white">Piper Engine</span>
+   470→                {piperStatus?.binary?.ready ? (
+   471→                  <span className="text-xs text-green-400">Installed ✅</span>
+   472→                ) : (
+   473→                  <span className="text-xs text-slate-500">Not installed</span>
+   474→                )}
+   475→              </div>
+   476→              {!piperStatus?.binary?.ready && (
+   477→                <button
+   478→                  onClick={downloadPiperBinary}
+   479→                  disabled={piperBinaryDownloading}
+   480→                  className="w-full px-3 py-2 text-xs bg-cyan-600 hover:bg-cyan-700 disabled:bg-slate-700 text-white rounded-lg"
+   481→                >
+   482→                  {piperBinaryDownloading ? 'Downloading...' : 'Auto-Download Piper Engine (~15MB)'}
+   483→                </button>
+   484→              )}
+   485→            </div>
+   486→
+   487→            <div className="grid grid-cols-2 gap-3">
+   488→              {/* Urdu Model */}
+   489→              <div className="bg-slate-900 rounded-lg p-3 space-y-2">
+   490→                <div className="flex items-center justify-between">
+   491→                  <span className="text-sm text-white">Urdu Model</span>
+   492→                  {piperStatus?.urdu?.ready ? (
+   493→                    <span className="text-xs text-green-400">Downloaded</span>
+   494→                  ) : (
+   495→                    <span className="text-xs text-slate-500">Not downloaded</span>
+   496→                  )}
+   497→                </div>
+   498→                {!piperStatus?.urdu?.ready && (
+   499→                  <button
+   500→                    onClick={() => downloadPiperModel('ur')}
+   501→                    disabled={piperDownloading === 'ur'}
+   502→                    className="w-full px-3 py-2 text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 text-white rounded-lg"
+   503→                  >
+   504→                    {piperDownloading === 'ur' 
+   505→                      ? `Downloading ${piperProgress?.percent || 0}%` 
+   506→                      : 'Download Urdu Model (~30MB)'}
+   507→                  </button>
+   508→                )}
+   509→                {piperDownloading === 'ur' && piperProgress && (
+   510→                  <div className="w-full bg-slate-800 rounded-full h-1.5">
+   511→                    <div
+   512→                      className="bg-blue-500 rounded-full h-1.5 transition-all"
+   513→                      style={{ width: `${piperProgress.percent || 0}%` }}
+   514→                    />
+   515→                  </div>
+   516→                )}
+   517→              </div>
+   518→
+   519→              {/* English Model */}
+   520→              <div className="bg-slate-900 rounded-lg p-3 space-y-2">
+   521→                <div className="flex items-center justify-between">
+   522→                  <span className="text-sm text-white">English Model</span>
+   523→                  {piperStatus?.english?.ready ? (
+   524→                    <span className="text-xs text-green-400">Downloaded</span>
+   525→                  ) : (
+   526→                    <span className="text-xs text-slate-500">Not downloaded</span>
+   527→                  )}
+   528→                </div>
+   529→                {!piperStatus?.english?.ready && (
+   530→                  <button
+   531→                    onClick={() => downloadPiperModel('en')}
+   532→                    disabled={piperDownloading === 'en'}
+   533→                    className="w-full px-3 py-2 text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 text-white rounded-lg"
+   534→                  >
+   535→                    {piperDownloading === 'en' 
+   536→                      ? `Downloading ${piperProgress?.percent || 0}%` 
+   537→                      : 'Download English Model (~60MB)'}
+   538→                  </button>
+   539→                )}
+   540→                {piperDownloading === 'en' && piperProgress && (
+   541→                  <div className="w-full bg-slate-800 rounded-full h-1.5">
+   542→                    <div
+   543→                      className="bg-blue-500 rounded-full h-1.5 transition-all"
+   544→                      style={{ width: `${piperProgress.percent || 0}%` }}
+   545→                    />
+   546→                  </div>
+   547→                )}
+   548→              </div>
+   549→            </div>
+   550→
+   551→            <p className="text-xs text-slate-600">
+   552→              Note: Piper binary auto-downloads on first use. You can also manually download from: github.com/rhasspy/piper/releases
+   553→            </p>
+   554→          </div>
+   555→
+   556→          {/* Voice Test */}
+   557→          <div className="bg-slate-800 rounded-lg p-4 space-y-3">
+   558→            <h3 className="text-sm font-medium text-slate-300">Voice Test</h3>
+   559→            <p className="text-xs text-slate-500">Test your TTS setup by generating a short audio clip.</p>
+   560→            <div className="flex items-center gap-3">
+   561→              <button
+   562→                onClick={() => testVoice('ur')}
+   563→                disabled={!!testTTSStatus}
+   564→                className="px-4 py-2 text-xs bg-purple-600 hover:bg-purple-700 disabled:bg-slate-700 text-white rounded-lg"
+   565→              >
+   566→                🔊 Test Urdu Voice
+   567→              </button>
+   568→              <button
+   569→                onClick={() => testVoice('en')}
+   570→                disabled={!!testTTSStatus}
+   571→                className="px-4 py-2 text-xs bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 text-white rounded-lg"
+   572→              >
+   573→                🔊 Test English Voice
+   574→              </button>
+   575→            </div>
+   576→            {testTTSStatus && (
+   577→              <p className="text-xs text-slate-300">{testTTSStatus}</p>
+   578→            )}
+   579→          </div>
+   580→        </section>
+   581→
+   582→        {/* ─── About Section ─── */}
+   583→        <section className="bg-slate-900 border border-slate-700 rounded-lg p-6">
+   584→          <h2 className="text-lg font-semibold text-white mb-3">About</h2>
+   585→          <div className="space-y-2 text-sm text-slate-400">
+   586→            <p>JARVIS Hybrid v3.0.3</p>
+   587→            <p>AI-Powered Desktop Assistant with Voice & Automation</p>
+   588→            <p className="text-xs text-slate-600">
+   589→              Voice: ElevenLabs + Edge TTS (free) + OpenAI + Sarvam + Piper (offline)
+   590→              {' | '}STT: Groq Whisper + OpenAI Whisper
+   591→            </p>
+   592→          </div>
+   593→        </section>
+   594→      </div>
+   595→    </div>
+   596→  );
+   597→}
+   598→
