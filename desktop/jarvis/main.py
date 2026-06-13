@@ -19,6 +19,7 @@ import time
 import argparse
 import threading
 from datetime import datetime
+import requests
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -43,15 +44,17 @@ def main():
     parser = argparse.ArgumentParser(description="JARVIS Hybrid - Desktop Agent")
     parser.add_argument("--cloud-url", default="", help="JARVIS Cloud URL (Vercel)")
     parser.add_argument("--user-id", default="local_user", help="User ID")
-    parser.add_argument("--no-voice", action="store_true", help="Disable voice")
+    parser.add_argument("--no-voice", action="store_true", help="Disable voice (no TTS/STT)")
+    parser.add_argument("--local-cli", action="store_true", help="Local CLI mode (no cloud connection)")
     parser.add_argument("--gui", action="store_true", help="Launch GUI dashboard")
+    parser.add_argument("--background", action="store_true", help="Run connector/services without interactive CLI")
     parser.add_argument("--monitor-whatsapp", action="store_true", help="Auto-monitor WhatsApp")
     parser.add_argument("--auto-job-search", action="store_true", help="Auto-search for jobs")
     parser.add_argument("--auto-update", action="store_true", help="Enable auto-updates")
     args = parser.parse_args()
 
-    # Default cloud URL
-    if not args.cloud_url:
+    # Default cloud URL for local dev
+    if not args.cloud_url and not args.local_cli:
         args.cloud_url = "https://jarvis-hybrid.vercel.app"
 
     print()
@@ -94,7 +97,7 @@ def main():
     updater = AutoUpdater(repo_path=repo_path)
     print("[Init] ✅ Auto-Updater ready")
 
-    # Voice engines
+    # Voice engines - graceful failure if --no-voice or packages missing
     voice_engine = None
     stt_engine = None
     if not args.no_voice:
@@ -103,16 +106,44 @@ def main():
             voice_engine.initialize()
             stt_engine = STTEngine()
             stt_engine.initialize()
-            print("[Init] ✅ Voice engines ready")
+            print("[Init] ✅ Voice engines ready (TTS/STT enabled)")
+        except ImportError as e:
+            print(f"[Init] ⚠️ Voice packages not available: {e}")
+            print("[Init]    Tip: Run with --no-voice to skip voice, or install voice packages")
         except Exception as e:
-            print(f"[Init] ⚠️ Voice engines failed: {e}")
+            print(f"[Init] ⚠️ Voice initialization failed: {e}")
+            print("[Init]    Continuing without voice support...")
+    else:
+        print("[Init] ℹ️ Voice disabled (--no-voice flag)")
+
+    # ====== LOCAL CLI MODE (no cloud) ======
+    if args.local_cli:
+        print()
+        print("[Local Mode] Running in offline mode (no cloud connection)")
+        print("[Local Mode] You can test local desktop automation directly")
+        print()
+        _launch_local_cli(windows_agent, file_agent)
+        return
 
     # ====== CONNECTOR ======
     connector = DesktopConnector(cloud_url, args.user_id)
     print(f"\n[Connect] Cloud: {cloud_url}")
 
+    # Try to reach cloud
+    try:
+        response = requests.get(f"{cloud_url}/api/health", timeout=5)
+        if response.status_code == 200:
+            print("[Connect] ✅ Cloud is reachable")
+        else:
+            print(f"[Connect] ⚠️ Cloud returned status {response.status_code}")
+    except requests.RequestException as e:
+        print(f"[Connect] ⚠️ Cannot reach cloud: {e}")
+        print("[Connect]    Desktop automation will work offline")
+
+    connector.connect()
+
     # ====== AUTO-START SERVICES ======
-    
+
     # WhatsApp monitoring
     if args.monitor_whatsapp:
         whatsapp_agent.open_whatsapp()
@@ -138,7 +169,7 @@ def main():
     def on_notification(data):
         """Handle notifications from agents"""
         ntype = data.get("type", "")
-        
+
         if ntype == "whatsapp_message":
             sender = data.get("sender", "Unknown")
             preview = data.get("preview", "")
@@ -147,7 +178,10 @@ def main():
                 "message": preview or "New message",
             })
             if voice_engine:
-                voice_engine.speak(f"{sender} نے واٹس ایپ پر پیغام بھیجا", emotion="normal")
+                try:
+                    voice_engine.speak(f"{sender} نے واٹس ایپ پر پیغام بھیجا", emotion="normal")
+                except:
+                    pass
 
         elif ntype == "new_jobs":
             count = data.get("count", 0)
@@ -157,7 +191,10 @@ def main():
                 "message": f"{count} jobs for '{query}'",
             })
             if voice_engine:
-                voice_engine.speak(f"{count} نئی جابز ملی ہیں", emotion="happy")
+                try:
+                    voice_engine.speak(f"{count} نئی جابز ملی ہیں", emotion="happy")
+                except:
+                    pass
 
     whatsapp_agent.notification_callback = on_notification
     job_agent.notification_callback = on_notification
@@ -165,6 +202,16 @@ def main():
         "type": "update",
         **info,
     })
+
+    if args.background:
+        print("[Background] Running desktop automation agent. Press Ctrl+C to stop.")
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            connector.disconnect()
+            print("[Background] Stopped")
+        return
 
     # ====== LAUNCH ======
     if args.gui:
@@ -184,6 +231,190 @@ def main():
         windows_agent, file_agent,
         whatsapp_agent, job_agent, updater
     )
+
+
+# ============== SAFETY HELPERS ==============
+
+def _confirm_destructive_action(action_name: str) -> bool:
+    """Ask user to confirm a destructive action"""
+    print()
+    print(f"⚠️  WARNING: This will {action_name}")
+    print("   This action cannot be undone!")
+    response = input("   Type 'YES' to confirm, or press Enter to cancel: ").strip().upper()
+    return response == "YES"
+
+
+# ============== LOCAL CLI INTERFACE ==============
+
+def _launch_local_cli(windows_agent, file_agent):
+    """Local CLI mode - test desktop automation without cloud"""
+    print("🤖 JARVIS Local Mode - Test Desktop Automation")
+    print("   No cloud connection required")
+    print()
+    print("Available local actions:")
+    print("   📸 !screenshot [path]        - Take screenshot")
+    print("   💻 !system                   - Get system info")
+    print("   📱 !open <app>               - Open application")
+    print("   🌐 !url <url>                - Open URL")
+    print("   🔍 !google <query>           - Google search")
+    print("   📺 !youtube <query>          - YouTube search")
+    print("   ⌨️  !type <text>              - Type text")
+    print("   🎮 !hotkey <keys>            - Press hotkey (e.g., ctrl+c)")
+    print("   🖱️  !click <x> <y>            - Click at coordinates")
+    print("   🔑 !press <key>              - Press single key")
+    print("   📋 !clip read                - Read clipboard")
+    print("   📋 !clip write <text>        - Write to clipboard")
+    print("   🔔 !notify <title> <msg>     - Send notification")
+    print("   ❓ !help                     - Show this help")
+    print()
+
+    while True:
+        try:
+            user_input = input("local> ").strip()
+            if not user_input:
+                continue
+
+            if user_input.lower() in ["exit", "quit", "بند"]:
+                print("Goodbye! / خدا حافظ!")
+                break
+
+            parts = user_input.split(maxsplit=1)
+            cmd = parts[0].lower()
+            arg = parts[1] if len(parts) > 1 else ""
+
+            # ============== LOCAL COMMANDS ==============
+            if cmd == "!screenshot":
+                path = arg or os.path.expanduser("~/Desktop/screenshot.png")
+                result = windows_agent.screenshot({"path": path})
+                print(f"📸 {result.get('message', result.get('error', ''))}")
+
+            elif cmd == "!system":
+                result = windows_agent.system_info()
+                if result.get("success"):
+                    info = result.get("data", {})
+                    print("💻 System Info:")
+                    for key, val in info.items():
+                        print(f"   {key}: {val}")
+
+            elif cmd == "!open":
+                if not arg:
+                    print("❌ Usage: !open <app_name>")
+                    continue
+                result = windows_agent.open_app({"name": arg})
+                print(f"📱 {result.get('message', result.get('error', ''))}")
+
+            elif cmd == "!url":
+                if not arg:
+                    print("❌ Usage: !url <url>")
+                    continue
+                result = windows_agent.open_url({"url": arg})
+                print(f"🌐 {result.get('message', result.get('error', ''))}")
+
+            elif cmd == "!google":
+                if not arg:
+                    print("❌ Usage: !google <query>")
+                    continue
+                result = windows_agent.google_search({"query": arg})
+                print(f"🔍 {result.get('message', result.get('error', ''))}")
+
+            elif cmd == "!youtube":
+                if not arg:
+                    print("❌ Usage: !youtube <query>")
+                    continue
+                result = windows_agent.youtube_search({"query": arg})
+                print(f"📺 {result.get('message', result.get('error', ''))}")
+
+            elif cmd == "!type":
+                if not arg:
+                    print("❌ Usage: !type <text>")
+                    continue
+                result = windows_agent.type_text({"text": arg})
+                print(f"⌨️ {result.get('message', result.get('error', ''))}")
+
+            elif cmd == "!hotkey":
+                if not arg:
+                    print("❌ Usage: !hotkey <keys> (e.g., ctrl+c)")
+                    continue
+                result = windows_agent.hotkey({"keys": arg})
+                print(f"🎮 {result.get('message', result.get('error', ''))}")
+
+            elif cmd == "!click":
+                coords = arg.split()
+                if len(coords) != 2:
+                    print("❌ Usage: !click <x> <y>")
+                    continue
+                try:
+                    result = windows_agent.click({"x": int(coords[0]), "y": int(coords[1])})
+                    print(f"🖱️ {result.get('message', result.get('error', ''))}")
+                except ValueError:
+                    print("❌ Coordinates must be numbers")
+
+            elif cmd == "!press":
+                if not arg:
+                    print("❌ Usage: !press <key>")
+                    continue
+                result = windows_agent.press({"key": arg})
+                print(f"🔑 {result.get('message', result.get('error', ''))}")
+
+            elif cmd == "!clip":
+                subparts = arg.split(maxsplit=1)
+                if not subparts:
+                    print("❌ Usage: !clip read  or  !clip write <text>")
+                    continue
+
+                if subparts[0] == "read":
+                    result = windows_agent.clipboard_read()
+                    if result.get("success"):
+                        print(f"📋 {result.get('data', {}).get('content', '')}")
+                    else:
+                        print(f"❌ {result.get('error', '')}")
+
+                elif subparts[0] == "write":
+                    text = subparts[1] if len(subparts) > 1 else ""
+                    if not text:
+                        print("❌ Usage: !clip write <text>")
+                        continue
+                    result = windows_agent.clipboard_write({"content": text})
+                    print(f"📋 {result.get('message', result.get('error', ''))}")
+
+            elif cmd == "!notify":
+                parts_notify = arg.split(maxsplit=1)
+                if len(parts_notify) < 2:
+                    print("❌ Usage: !notify <title> <message>")
+                    continue
+                result = windows_agent.send_notification({
+                    "title": parts_notify[0],
+                    "message": parts_notify[1],
+                })
+                print(f"🔔 {result.get('message', result.get('error', ''))}")
+
+            elif cmd == "!help":
+                print("""
+📋 JARVIS Local Commands:
+  📸 !screenshot [path]    — Take screenshot
+  💻 !system               — Get system info
+  📱 !open <app>           — Open application
+  🌐 !url <url>            — Open URL
+  🔍 !google <query>       — Google search
+  📺 !youtube <query>      — YouTube search
+  ⌨️  !type <text>          — Type text
+  🎮 !hotkey <keys>        — Press hotkey (ctrl+c, alt+tab, etc)
+  🖱️  !click <x> <y>        — Click at coordinates
+  🔑 !press <key>          — Press single key
+  📋 !clip read            — Read clipboard
+  📋 !clip write <text>    — Write to clipboard
+  🔔 !notify <title> <msg> — Send notification
+  ❓ !help                  — This help
+""")
+
+            else:
+                print(f"❌ Unknown command: {cmd}. Type !help for list.")
+
+        except KeyboardInterrupt:
+            print("\n\nGoodbye! / خدا حافظ!")
+            break
+        except Exception as e:
+            print(f"❌ Error: {e}")
 
 
 # ============== CLI INTERFACE ==============
@@ -308,9 +539,12 @@ def _launch_cli(connector, voice_engine, stt_engine,
                             print(f"   Commits: {result.get('new_commits', 0)}")
 
                     elif arg == "update" or arg == "now":
-                        print("🔄 Updating...")
-                        result = updater.perform_update({"auto_restart": True})
-                        print(f"🔄 {result.get('message', result.get('error', ''))}")
+                        if _confirm_destructive_action("restart the application to install updates"):
+                            print("🔄 Updating...")
+                            result = updater.perform_update({"auto_restart": True})
+                            print(f"🔄 {result.get('message', result.get('error', ''))}")
+                        else:
+                            print("🔄 Update cancelled")
 
                     elif arg == "version":
                         result = updater.get_version_info()

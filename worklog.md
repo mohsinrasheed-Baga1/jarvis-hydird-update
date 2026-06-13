@@ -1,52 +1,120 @@
 ---
 Task ID: 1
 Agent: Main Agent
-Task: Fix mic/voice input and ElevenLabs TTS in Electron desktop app
+Task: Implement complete auto-update system for JARVIS-HYBRID
 
 Work Log:
-- Cloned repo from GitHub and analyzed full codebase architecture
-- Identified root cause: preload.js `recordAndTranscribe` uses `navigator.mediaDevices.getUserMedia` in Electron's isolated preload context, which is unreliable with contextIsolation=true
-- Identified TTS issue: when IPC TTS fails, code falls back to speechSynthesis (robotic voice) instead of trying backend API properly
-- Identified update issue: Electron loads dist/ which isn't rebuilt after git pull
+- Audited project state at /home/z/my-project/jarvis-hydird-update/
+- No merge conflicts, clean working tree on main branch
+- No .github/workflows/build.yml existed, no ci/ directory
+- package.json had version 2.3.0, portable + NSIS targets, wrong artifactName
+- main.js had hardcoded APP_VERSION, basic auto-updater without diagnostics
+- preload.js missing getUpdateDiagnostics, getUpdateLog, installUpdateNow
+- SettingsPage.tsx had no update diagnostics panel
+- App.tsx had hardcoded version fallback
 
-Fixes Applied:
-1. **preload.js**: Rewrote `recordAndTranscribe` to use renderer-based MediaRecorder then IPC transcription. Kept IPC helpers (`transcribeAudioBase64`, `generateTTS`) which work reliably.
-2. **MessageInput.tsx**: Changed `toggleMic()` to always use `startRecordedFallback()` in Electron (renderer-based recording). Updated `finishRecordedInput()` to try IPC transcription first, then backend API.
-3. **ChatPage.tsx**: Improved TTS fallback chain - IPC TTS → backend API TTS → speechSynthesis. Added `tryBackendTTS()` helper.
-4. **VoicePage.tsx**: Rewrote to use renderer-based recording + IPC transcription instead of broken preload approach.
-5. **main.js**: Added `rebuildViteIfNeeded()` auto-rebuild on startup. Improved `loadWebApp()` to prefer dist/ with fallback chain.
-6. **START_JARVIS.bat**: Added better logging for Vite build process.
+Changes Made:
+1. package.json: version 2.4.0, NSIS-only target, artifactName JARVIS-Setup-${version}.${ext}
+2. main.js: app.getVersion() dynamic versioning, complete autoUpdater events (checking-for-update, update-available, update-not-available, download-progress, update-downloaded, error), version guard (semverCompare), GH token handling (setFeedURL), updateState tracking, get-update-diagnostics IPC (token shows Loaded/Not Loaded only), get-update-log IPC, install-update-now IPC, 5-second startup check
+3. preload.js: Added getUpdateDiagnostics, getUpdateLog, installUpdateNow IPC bridge
+4. SettingsPage.tsx: Full Update Diagnostics panel with status indicator, Installed Version, Latest Found, Last Check, Download Progress bar, GH Token status, Config Source, Feed URL, View Log modal, Check Now button, Restart & Install button
+5. App.tsx: Dynamic version from app.getVersion(), update status banner with progress/downloaded/restart actions
+6. .github/workflows/build.yml: GitHub Actions CI/CD workflow for Windows build + publish
 
 Stage Summary:
-- All 6 files committed locally but CANNOT push to GitHub without authentication token
-- User needs to either: (a) provide GitHub token, or (b) pull these changes manually
-- Key architecture fix: Recording happens in RENDERER context (reliable), transcription happens via IPC to MAIN process (reliable)
+- All 6 files committed as v2.4.0 (commit 548158f)
+- Git remote cleaned (removed embedded PAT)
+- Push blocked: need valid GH_PAT to push to private repo
+- BLOCKED: User must provide new GH_PAT (previous one compromised) to proceed with push and GitHub Actions build
+---
+Task ID: 2.5.0-upgrade
+Agent: Main Agent
+Task: JARVIS Hybrid v2.5.0 Major Upgrade - Browser, Screen Analysis, Mouse/Keyboard Automation
+
+Work Log:
+- Analyzed user screenshots showing backend offline and settings page scroll issues
+- Fixed Settings page scrolling: changed parent section from overflow-hidden to overflow-y-auto, added pb-12 padding
+- Changed "Backend Offline" UI to "Direct API Mode" (yellow, less alarming instead of red)
+- Added auto-retry for crashed cloud backend process (10 second delay, up to retry)
+- Created BrowserPage.tsx - full in-app browser with webview, URL bar, screenshot, AI screen analysis
+- Added webviewTag: true to BrowserWindow webPreferences for embedded browser support
+- Added screen analysis capability using AI Vision (Groq/OpenAI/Gemini) - screenshot + analyze
+- Added mouse/keyboard automation: mouse-click, mouse-move, type-text, key-press, key-combo
+- Added job search automation: Upwork, Fiverr, Freelancer support
+- Enhanced system prompt with:
+  - Never reveal AI identity rule (7 rules)
+  - Professional capabilities list (8 capabilities)
+  - Professional behavior rules (7 rules)
+  - New action types (7 new actions)
+- Added Browser nav item in sidebar
+- Updated ChatPage to accept onOpenBrowser prop
+- Added local automation detection for screen analysis and job search
+- Added IPC bridge methods in preload.js for new features
+- Bumped version to 2.5.0
+- Built and verified Vite build successfully
+- Pushed to GitHub with PAT
+- Created v2.5.0 tag and pushed
+
+Stage Summary:
+- All code changes committed and pushed to GitHub
+- v2.5.0 tag created and pushed
+- GitHub Actions workflow should trigger and build the Windows installer
+- New features: Browser, Screen Analysis, Mouse/Keyboard, Job Search, Enhanced AI
+- Bug fixes: Settings scroll, Backend offline UI, Auto-retry backend
+---
+Task ID: 1
+Agent: Main Agent
+Task: Fix auto-update pipeline - diagnose and fix GitHub Actions build failure
+
+Work Log:
+- Diagnosed root cause: package.json was 2.4.1 but tag v2.5.0 was pushed, causing electron-builder to build v2.4.1 and try to overwrite existing release assets, resulting in 404 DELETE error
+- Found secondary cause: Both main push and tag push triggered `--publish always`, causing double-publish conflicts
+- Bumped version to 2.5.0 in package.json and VERSION file
+- Rewrote .github/workflows/build.yml: only publish on tag push, build-only on main push
+- Fixed Settings page scroll: changed overflow-hidden to overflow-auto in App.tsx
+- Deleted old v2.4.0 and v2.4.1 releases from GitHub to prevent conflicts
+- Deleted old remote tags (v2.4.0, v2.4.1, v2.5.0)
+- Pushed commit to main branch (success)
+- Created new v2.5.0 tag and pushed it (success)
+- Both GitHub Actions runs completed successfully
+- Verified v2.5.0 release on GitHub with all 3 assets: JARVIS-Setup-2.5.0.exe (80.32MB), .blockmap, latest.yml
+- Verified latest.yml shows version 2.5.0 correctly
+- Confirmed repo is public - latest.yml accessible without auth
+- Auto-update should now work: app v2.4.1 → finds v2.5.0 → auto-downloads → installs on restart
+
+Stage Summary:
+- v2.5.0 release created and live on GitHub: https://github.com/mohsinrasheed-Baga1/jarvis-hydird-update/releases/tag/v2.5.0
+- Download link: https://github.com/mohsinrasheed-Baga1/jarvis-hydird-update/releases/download/v2.5.0/JARVIS-Setup-2.5.0.exe
+- CI/CD pipeline fixed: tag push = publish release, main push = build only
+- Settings page scroll fixed
+- Auto-update system should now work end-to-end for users on v2.4.1
 
 ---
-Task ID: 2
+Task ID: 1
 Agent: Main Agent
-Task: v3.0.5 - Fix Piper download, TTS, STT + Terminal + Mouse/Keyboard + Screen Analysis + Multi API Keys + UI Redesign
+Task: JARVIS v3.0.6 - Fix Piper, TTS, YouTube, mouse/keyboard, screen analysis, UI consolidation
 
 Work Log:
-- Analyzed full codebase: main.js (2400+ lines), preload.js, App.tsx, ChatPage.tsx, MessageInput.tsx, SettingsPage.tsx
-- Fixed downloadFile() function: atomic writes with temp files, response timeout (60s), proper redirect handling (10 max), relative URL support, progress reporting, double-resolve prevention
-- Fixed Piper download progress: Real-time percentage reporting during model download (0-80%) and config download (80-100%) with MB/KB detail
-- Fixed TTS pipeline: Made Edge-TTS the PRIMARY provider (free, no API key, best Urdu), improved Python detection (python/python3/py), auto-install edge-tts with --user flag
-- Fixed STT: Changed from whisper-large-v3-turbo to whisper-large-v3 for better Urdu accuracy, added Urdu context prompt
-- Added Terminal IPC handlers: terminal-execute, terminal-create-session, terminal-write, terminal-kill, terminal-output streaming
-- Added Mouse/Keyboard control: mouse-move, mouse-click, keyboard-type, keyboard-press, keyboard-hotkey (Windows PowerShell)
-- Added Screen Analysis: screen-capture + screen-analyze with Groq/OpenAI Vision API
-- Added play-youtube-auto: Opens YouTube search + auto-clicks first result via keyboard simulation
-- Added Multiple API Keys: loadMultiKeys/saveMultiKeys with jarvis-api-keys.json, add/remove/get-active-key with round-robin rotation
-- Created TerminalPage.tsx: Full terminal UI with command history, quick commands, output coloring
-- Redesigned App.tsx: Merged Dashboard/Chat/Files/Automation into single page with tabs, Settings as separate overlay, modern header with gradient tabs
-- Updated SettingsPage.tsx: Added Multiple API Keys manager section, updated version to v3.0.5
-- Updated preload.js: Added all new IPC bridges (terminal, mouse, keyboard, screen, multi-keys)
-- Bumped version to 3.0.5 across package.json, main.js, VERSION file
-- Committed and pushed v3.0.5 tag to trigger GitHub Actions release
+- Analyzed 4 user screenshots showing Piper download errors, TTS not working, YouTube can't play
+- Read full main.js (2488 lines), ChatPage.tsx, App.tsx, TerminalPage.tsx, SettingsPage.tsx
+- Fixed Piper binary download: recursive file search, file size validation, temp file cleanup, PS path escaping
+- Fixed Piper model status: validate file sizes (>1MB for model, >1KB for config), auto-delete corrupted files
+- Fixed Edge TTS installation: try multiple Python commands (python, python3, py), verify after install
+- Fixed YouTube auto-play: open in Chrome specifically (3 path checks), wait 4s, tab 20 times + Enter
+- Fixed JARVIS repeating: added NO REPEATING rules to system prompt, limited to 1 action per message
+- Fixed YouTube commands: changed all desktopAction from open-youtube to play-youtube
+- Added play-youtube action routing through desktop-action IPC with auto-click
+- Added mouse-move, mouse-click, keyboard-type, keyboard-press, keyboard-hotkey to desktop-action handler
+- Added screen-analyze to desktop-action handler (screenshot + Groq Vision)
+- Updated system prompt with new action types (mouse, keyboard, screen-analyze)
+- UI consolidation: Chat is main view, Terminal as side panel, Settings separate
+- Updated all version references to 3.0.6
+- Committed and pushed to GitHub, tag v3.0.6 created
 
 Stage Summary:
-- v3.0.5 pushed to GitHub with tag, release should build automatically
-- All critical voice issues fixed (Piper download, TTS pipeline, STT accuracy)
-- 5 new major features added (Terminal, Mouse/Keyboard, Screen Analysis, Multi API Keys, YouTube auto-play)
-- UI completely redesigned (single-page with tabs + Settings overlay)
+- v3.0.6 pushed with tag to GitHub
+- Piper download fixed with recursive search and file validation
+- YouTube now opens in Chrome and auto-plays first video
+- Mouse/keyboard/screen control now works through [ACTION:json] blocks
+- UI consolidated: Chat + Terminal side panel + Settings overlay
+- TTS pipeline improved with better Edge TTS installation

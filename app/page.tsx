@@ -1,10 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import type {
-  EmotionType, JarvisMessage, APIKeys, LLMProvider,
-  ResearchEntry, ResearchCategory, ResearchSource, SidebarSection,
-} from "@/lib/protocol";
+import type { EmotionType, JarvisMessage, APIKeys, LLMProvider } from "@/lib/protocol";
 
 interface UploadedFile {
   name: string;
@@ -20,25 +17,29 @@ interface BackgroundTask {
   result?: string;
 }
 
-function formatMessage(content: string): string {
-  return content
-    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="language-$1">$2</code></pre>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    .replace(/\n/g, '<br/>');
+interface DesktopActionResult { success: boolean; message: string; }
+interface ElectronDesktopAPI {
+  desktopAction: (action: { type: string; url?: string; query?: string; command?: string; path?: string; title?: string; body?: string; app?: string }) => Promise<DesktopActionResult>;
+  openUrl: (url: string) => Promise<DesktopActionResult>;
+  searchYoutube: (query: string) => Promise<DesktopActionResult>;
+  playYoutube: (queryOrUrl: string) => Promise<DesktopActionResult>;
+  systemCommand: (cmd: string) => Promise<DesktopActionResult>;
+  openFolder: (path: string) => Promise<DesktopActionResult>;
+  openApp: (app: string) => Promise<DesktopActionResult>;
+  showNotification: (title: string, body: string) => Promise<DesktopActionResult>;
+  platform: string;
 }
 
-// ============== MAIN APP PAGE ==============
-export default function JarvisApp() {
-  // === Section navigation ===
-  const [activeSection, setActiveSection] = useState<SidebarSection>("dashboard");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+function isElectron(): boolean {
+  return !!(window as any).__JARVIS_DESKTOP__ || !!(window as any).electronAPI;
+}
 
-  // === API Keys (shared across sections) ===
+function getElectronAPI(): ElectronDesktopAPI | undefined {
+  return (window as any).electronAPI;
+}
+
+// ============== MAIN CHAT PAGE ==============
+export default function ChatPage() {
   const loadApiKeys = (): APIKeys => {
     if (typeof window === "undefined") return {};
     try {
@@ -52,310 +53,7 @@ export default function JarvisApp() {
     return (localStorage.getItem("jarvis_active_provider") as LLMProvider) || "groq";
   };
 
-  const [apiKeys, setApiKeys] = useState<APIKeys>(loadApiKeys);
-  const [activeProvider, setActiveProvider] = useState<LLMProvider>(loadActiveProvider);
-  const hasAnyKey = Object.values(apiKeys).some((k) => k && k.trim().length > 0);
-
-  const saveApiKeys = useCallback((keys: APIKeys) => {
-    setApiKeys(keys);
-    localStorage.setItem("jarvis_api_keys", JSON.stringify(keys));
-  }, []);
-
-  const saveActiveProvider = useCallback((provider: LLMProvider) => {
-    setActiveProvider(provider);
-    localStorage.setItem("jarvis_active_provider", provider);
-  }, []);
-
-  // === Sidebar items ===
-  const sidebarItems: Array<{ id: SidebarSection; icon: string; label: string }> = [
-    { id: "dashboard", icon: "🏠", label: "Dashboard" },
-    { id: "chat", icon: "💬", label: "Chat" },
-    { id: "recording", icon: "🎙️", label: "Recording" },
-    { id: "settings", icon: "⚙️", label: "Settings" },
-    { id: "research", icon: "📚", label: "Research" },
-  ];
-
-  return (
-    <div className="app-layout">
-      {/* Sidebar */}
-      <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
-        <div className="sidebar-header">
-          <div className="sidebar-logo">🧠</div>
-          <div>
-            <div className="sidebar-title">JARVIS</div>
-            <div className="sidebar-subtitle">Hybrid AI Assistant</div>
-          </div>
-        </div>
-        <nav className="sidebar-nav">
-          {sidebarItems.map((item) => (
-            <button
-              key={item.id}
-              className={`sidebar-item ${activeSection === item.id ? "active" : ""}`}
-              onClick={() => setActiveSection(item.id)}
-              title={item.label}
-            >
-              <span className="sidebar-item-icon">{item.icon}</span>
-              <span className="sidebar-item-label">{item.label}</span>
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-version">v2.0.0</div>
-        <div className="sidebar-toggle">
-          <button
-            className="sidebar-toggle-btn"
-            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            title={sidebarCollapsed ? "Expand" : "Collapse"}
-          >
-            {sidebarCollapsed ? "▸" : "◂"}
-          </button>
-        </div>
-      </aside>
-
-      {/* Main Content */}
-      <main className="main-content">
-        {activeSection === "dashboard" && (
-          <DashboardSection
-            apiKeys={apiKeys}
-            activeProvider={activeProvider}
-            hasAnyKey={hasAnyKey}
-            onNavigate={setActiveSection}
-          />
-        )}
-        {activeSection === "chat" && (
-          <ChatSection
-            apiKeys={apiKeys}
-            activeProvider={activeProvider}
-            hasAnyKey={hasAnyKey}
-            saveApiKeys={saveApiKeys}
-            saveActiveProvider={saveActiveProvider}
-          />
-        )}
-        {activeSection === "recording" && (
-          <RecordingSection apiKeys={apiKeys} />
-        )}
-        {activeSection === "settings" && (
-          <SettingsSection
-            apiKeys={apiKeys}
-            activeProvider={activeProvider}
-            hasAnyKey={hasAnyKey}
-            saveApiKeys={saveApiKeys}
-            saveActiveProvider={saveActiveProvider}
-          />
-        )}
-        {activeSection === "research" && (
-          <ResearchSection apiKeys={apiKeys} />
-        )}
-      </main>
-    </div>
-  );
-}
-
-// ============== DASHBOARD SECTION ==============
-function DashboardSection({
-  apiKeys, activeProvider, hasAnyKey, onNavigate,
-}: {
-  apiKeys: APIKeys;
-  activeProvider: LLMProvider;
-  hasAnyKey: boolean;
-  onNavigate: (s: SidebarSection) => void;
-}) {
-  const [connectionStatus, setConnectionStatus] = useState<"online" | "offline" | "nokey">("online");
-  const [updateStatus, setUpdateStatus] = useState<{
-    hasUpdate: boolean; currentVersion: string; latestVersion: string; status: string; lastChecked: number;
-  }>({ hasUpdate: false, currentVersion: "2.0.0", latestVersion: "2.0.0", status: "up-to-date", lastChecked: 0 });
-
-  useEffect(() => {
-    const checkHealth = async () => {
-      try {
-        const res = await fetch("/api/health");
-        await res.json();
-        setConnectionStatus(hasAnyKey ? "online" : "nokey");
-      } catch { setConnectionStatus("offline"); }
-    };
-    checkHealth();
-  }, [hasAnyKey]);
-
-  const checkForUpdates = useCallback(async () => {
-    const repo = localStorage.getItem("jarvis_github_repo") || "";
-    const token = localStorage.getItem("jarvis_github_token") || "";
-    try {
-      const res = await fetch(`/api/update?repo=${encodeURIComponent(repo)}&token=${encodeURIComponent(token)}`);
-      const data = await res.json();
-      setUpdateStatus({
-        hasUpdate: data.hasUpdate,
-        currentVersion: data.currentVersion,
-        latestVersion: data.latestVersion,
-        status: data.status,
-        lastChecked: data.lastChecked,
-      });
-    } catch {
-      setUpdateStatus(prev => ({ ...prev, status: "error" }));
-    }
-  }, []);
-
-  useEffect(() => { checkForUpdates(); }, [checkForUpdates]);
-
-  const configuredKeys = Object.entries(apiKeys).filter(([, v]) => v && v.trim().length > 0).length;
-  const providerLabels: Record<LLMProvider, string> = {
-    groq: "Groq", gemini: "Gemini", openai: "OpenAI", zai: "ZAI", xai: "xAI", anthropic: "Claude",
-  };
-
-  const agents = [
-    { name: "Windows Agent", icon: "🖥️", status: "standby" as const },
-    { name: "Browser Agent", icon: "🌐", status: "active" as const },
-    { name: "WhatsApp Agent", icon: "📱", status: "standby" as const },
-    { name: "Freelance Agent", icon: "💼", status: "active" as const },
-  ];
-
-  const conversationsCount = (() => {
-    try {
-      const msgs = localStorage.getItem("jarvis_conversation_count");
-      return msgs ? parseInt(msgs, 10) : 0;
-    } catch { return 0; }
-  })();
-
-  return (
-    <div className="dashboard">
-      <div className="dashboard-header">
-        <div className="dashboard-title">JARVIS Dashboard</div>
-        <div className="dashboard-subtitle">سسٹم کا جائزہ — ریان سر کا ذاتی ساتھی</div>
-      </div>
-
-      <div className="dashboard-grid">
-        {/* System Status */}
-        <div className="dash-card">
-          <div className="dash-card-header">
-            <span className="dash-card-title">System Status</span>
-            <div className="dash-card-icon purple">⚡</div>
-          </div>
-          <div className={`dash-card-value ${connectionStatus === "online" ? "online" : connectionStatus === "offline" ? "offline" : "warning"}`}>
-            {connectionStatus === "online" ? "Online" : connectionStatus === "offline" ? "Offline" : "No API Key"}
-          </div>
-          <div className="dash-card-desc">
-            Active Provider: {hasAnyKey ? providerLabels[activeProvider] : "None configured"}
-          </div>
-          <span className={`status-badge ${connectionStatus === "online" ? "active" : "offline"}`}>
-            <span className="status-badge-dot"></span>
-            {connectionStatus === "online" ? "Connected" : "Disconnected"}
-          </span>
-        </div>
-
-        {/* API Keys */}
-        <div className="dash-card">
-          <div className="dash-card-header">
-            <span className="dash-card-title">API Keys</span>
-            <div className="dash-card-icon green">🔑</div>
-          </div>
-          <div className="dash-card-value">{configuredKeys}</div>
-          <div className="dash-card-desc">
-            {configuredKeys > 0
-              ? `Configured: ${Object.entries(apiKeys).filter(([, v]) => v && v.trim().length > 0).map(([k]) => providerLabels[k as LLMProvider] || k).join(", ")}`
-              : "No API keys configured"}
-          </div>
-          {configuredKeys === 0 && (
-            <button className="quick-btn" style={{ marginTop: 10 }} onClick={() => onNavigate("settings")}>
-              ⚙️ Add API Keys
-            </button>
-          )}
-        </div>
-
-        {/* Conversations */}
-        <div className="dash-card">
-          <div className="dash-card-header">
-            <span className="dash-card-title">Conversations</span>
-            <div className="dash-card-icon blue">💬</div>
-          </div>
-          <div className="dash-card-value">{conversationsCount}</div>
-          <div className="dash-card-desc">Total messages in current session</div>
-        </div>
-
-        {/* Auto-Update */}
-        <div className="dash-card">
-          <div className="dash-card-header">
-            <span className="dash-card-title">Auto-Update</span>
-            <div className="dash-card-icon orange">🔄</div>
-          </div>
-          <div className={`dash-card-value ${updateStatus.hasUpdate ? "warning" : "online"}`}>
-            v{updateStatus.currentVersion}
-          </div>
-          <div className="dash-card-desc">
-            {updateStatus.status === "up-to-date" && "Up to date ✓"}
-            {updateStatus.status === "update-available" && `Update available: v${updateStatus.latestVersion}`}
-            {updateStatus.status === "error" && "Could not check for updates"}
-          </div>
-          <button className="quick-btn" style={{ marginTop: 8 }} onClick={checkForUpdates}>
-            🔄 Check Now
-          </button>
-        </div>
-
-        {/* Earnings Overview */}
-        <div className="dash-card">
-          <div className="dash-card-header">
-            <span className="dash-card-title">Earnings</span>
-            <div className="dash-card-icon teal">💰</div>
-          </div>
-          <div className="dash-card-value" style={{ color: "var(--accent-tertiary)" }}>—</div>
-          <div className="dash-card-desc">Connect desktop app for earnings tracking</div>
-        </div>
-
-        {/* Quick Actions */}
-        <div className="dash-card" style={{ gridColumn: "1 / -1" }}>
-          <div className="dash-card-header">
-            <span className="dash-card-title">Quick Actions</span>
-            <div className="dash-card-icon yellow">🎯</div>
-          </div>
-          <div className="quick-actions-row">
-            <button className="quick-btn" onClick={() => onNavigate("chat")}>
-              🎙️ Voice Chat
-            </button>
-            <button className="quick-btn" onClick={() => onNavigate("chat")}>
-              🎯 Hunt Jobs
-            </button>
-            <button className="quick-btn" onClick={() => onNavigate("chat")}>
-              📝 Write Proposal
-            </button>
-            <button className="quick-btn" onClick={() => onNavigate("recording")}>
-              🎙️ Record Audio
-            </button>
-            <button className="quick-btn" onClick={() => onNavigate("research")}>
-              📚 Research
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Agent Status */}
-      <div style={{ marginTop: 24 }}>
-        <div className="dash-card-title" style={{ marginBottom: 12 }}>Agent Status</div>
-        <div className="agents-row">
-          {agents.map((agent) => (
-            <div key={agent.name} className="agent-card">
-              <div className="agent-card-icon">{agent.icon}</div>
-              <div className="agent-card-info">
-                <div className="agent-card-name">{agent.name}</div>
-                <span className={`status-badge ${agent.status}`}>
-                  <span className="status-badge-dot"></span>
-                  {agent.status === "active" ? "Active" : "Standby"}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ============== CHAT SECTION ==============
-function ChatSection({
-  apiKeys, activeProvider, hasAnyKey, saveApiKeys, saveActiveProvider,
-}: {
-  apiKeys: APIKeys;
-  activeProvider: LLMProvider;
-  hasAnyKey: boolean;
-  saveApiKeys: (keys: APIKeys) => void;
-  saveActiveProvider: (provider: LLMProvider) => void;
-}) {
+  // Core state
   const [messages, setMessages] = useState<JarvisMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -363,6 +61,8 @@ function ChatSection({
   const [connectionStatus, setConnectionStatus] = useState<"online" | "offline" | "nokey">("online");
   const [currentEmotion, setCurrentEmotion] = useState<EmotionType>("normal");
   const [streamingContent, setStreamingContent] = useState("");
+  const [apiKeys, setApiKeys] = useState<APIKeys>(loadApiKeys);
+  const [activeProvider, setActiveProvider] = useState<LLMProvider>(loadActiveProvider);
   const [userId] = useState(() => `user_${Date.now()}`);
 
   // Voice & Conversation
@@ -371,11 +71,33 @@ function ChatSection({
   const [isListening, setIsListening] = useState(false);
   const [conversationMode, setConversationMode] = useState(false);
 
+  // TTS Provider indicator
+  const [ttsProvider, setTtsProvider] = useState<string>("");
+
   // File upload
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
 
   // Background tasks
   const [bgTasks, setBgTasks] = useState<BackgroundTask[]>([]);
+
+  // Story Recording
+  const [isRecordingStory, setIsRecordingStory] = useState(false);
+  const [storyTitle, setStoryTitle] = useState("");
+  const [showStoryPanel, setShowStoryPanel] = useState(false);
+
+  // TTS Test
+  const [ttsTestResult, setTtsTestResult] = useState<string>("");
+  const [ttsTesting, setTtsTesting] = useState(false);
+
+  // Voice Cloning
+  const [showVoiceClone, setShowVoiceClone] = useState(false);
+  const [clonedVoiceId, setClonedVoiceId] = useState<string>("");
+  const [voiceCloneStatus, setVoiceCloneStatus] = useState<string>("");
+  const [voiceCloneRecording, setVoiceCloneRecording] = useState(false);
+  const [voiceCloneSamples, setVoiceCloneSamples] = useState<string[]>([]);
+  const [discoveredVoices, setDiscoveredVoices] = useState<Array<{id: string; name: string; gender: string; category: string}>>([]);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
 
   // Refs
   const conversationModeRef = useRef(false);
@@ -388,12 +110,33 @@ function ChatSection({
   const messagesRef = useRef<JarvisMessage[]>([]);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const speakQueueRef = useRef<boolean>(false);
+  const sttMediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const sttChunksRef = useRef<Blob[]>([]);
+  const sttStreamRef = useRef<MediaStream | null>(null);
+  const sttAutoSendRef = useRef(false);
+  const sttSilenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const sttAnalyserRef = useRef<AnalyserNode | null>(null);
+  const sttAudioContextRef = useRef<AudioContext | null>(null);
+  const startListeningRef = useRef<(autoSend?: boolean) => void>(() => {});
+  const sendMessageDirectRef = useRef<(text: string, fileData?: UploadedFile) => void>(() => {});
 
   // Sync refs
   useEffect(() => { conversationModeRef.current = conversationMode; }, [conversationMode]);
   useEffect(() => { isSpeakingRef.current = isSpeaking; }, [isSpeaking]);
   useEffect(() => { isLoadingRef.current = isLoading; }, [isLoading]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  const hasAnyKey = Object.values(apiKeys).some((k) => k && k.trim().length > 0);
+
+  const saveApiKeys = useCallback((keys: APIKeys) => {
+    setApiKeys(keys);
+    localStorage.setItem("jarvis_api_keys", JSON.stringify(keys));
+  }, []);
+
+  const saveActiveProvider = useCallback((provider: LLMProvider) => {
+    setActiveProvider(provider);
+    localStorage.setItem("jarvis_active_provider", provider);
+  }, []);
 
   // Auto-scroll
   useEffect(() => {
@@ -415,28 +158,41 @@ function ChatSection({
   // Show settings on first visit
   useEffect(() => {
     if (!hasAnyKey) setShowSettings(true);
-  }, [hasAnyKey]);
+  }, []);
 
-  // Load voices
+  // Load voices + Load cloned voice ID
   useEffect(() => {
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      const loadVoices = () => {
-        window.speechSynthesis.getVoices();
-      };
-      loadVoices();
-      window.speechSynthesis.onvoiceschanged = loadVoices;
+    if (typeof window !== "undefined") {
+      // Load saved cloned voice
+      const savedVoiceId = localStorage.getItem("jarvis_cloned_voice_id") || "";
+      if (savedVoiceId) setClonedVoiceId(savedVoiceId);
+
+      if (window.speechSynthesis) {
+        const loadVoices = () => {
+          const v = window.speechSynthesis.getVoices();
+          console.log("[JARVIS] Available voices:", v.length, v.filter(x => x.lang.startsWith("ur") || x.lang.startsWith("ar")).map(x => `${x.name} (${x.lang})`));
+        };
+        loadVoices();
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+      }
     }
   }, []);
 
   // ===== CANCEL ALL SPEECH =====
   const cancelAllSpeech = useCallback(() => {
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    if (currentAudioRef.current) { currentAudioRef.current.pause(); currentAudioRef.current = null; }
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
     setIsSpeaking(false);
     isSpeakingRef.current = false;
     speakQueueRef.current = false;
+    setTtsProvider("");
   }, []);
-
+  
   // ===== DETECT LANGUAGE =====
   const detectLanguage = (text: string): "ur" | "en" | "mixed" => {
     const urduChars = text.match(/[\u0600-\u06FF]/g);
@@ -447,9 +203,9 @@ function ChatSection({
     return "en";
   };
 
-  // ===== SPLIT URDU TEXT INTO SPEAKABLE CHUNKS =====
-  const splitUrduChunks = (text: string): string[] => {
-    const maxLen = 150;
+  // ===== SPLIT TEXT INTO CHUNKS =====
+  const splitTextChunks = (text: string, maxLen: number): string[] => {
+    if (text.length <= maxLen) return [text];
     const raw = text.split(/(?<=[.!?۔\n])\s*/);
     const chunks: string[] = [];
     let current = "";
@@ -466,29 +222,34 @@ function ChatSection({
   };
 
   // ===== BROWSER TTS =====
-  const speakWithBrowser = useCallback((
+  const speakWithBrowser = (
     text: string, lang: "ur" | "en" | "mixed", emotion: EmotionType,
     voice: SpeechSynthesisVoice | null, onDone?: () => void
   ) => {
-    const chunks = lang === "ur" ? splitUrduChunks(text) :
-      text.match(new RegExp(`.{1,180}[.!?\\n]|.{1,180}`, "g")) || [text];
+    const chunks = splitTextChunks(text, 180);
     let chunkIndex = 0;
     setIsSpeaking(true);
     isSpeakingRef.current = true;
     speakQueueRef.current = true;
+    setTtsProvider("Browser TTS");
     const speakChunk = () => {
       if (!speakQueueRef.current || chunkIndex >= chunks.length) {
         setIsSpeaking(false);
         isSpeakingRef.current = false;
         speakQueueRef.current = false;
+        setTtsProvider("");
         onDone?.();
         return;
       }
       const chunk = chunks[chunkIndex].trim();
       if (!chunk) { chunkIndex++; speakChunk(); return; }
       const utterance = new SpeechSynthesisUtterance(chunk);
-      if (voice) { utterance.voice = voice; utterance.lang = voice.lang; }
-      else { utterance.lang = (lang === "ur" || lang === "mixed") ? "ur-PK" : "en-US"; }
+      if (voice) {
+        utterance.voice = voice;
+        utterance.lang = voice.lang;
+      } else {
+        utterance.lang = (lang === "ur" || lang === "mixed") ? "ur-PK" : "en-US";
+      }
       utterance.rate = emotion === "happy" || emotion === "surprised" ? 1.0 : 0.88;
       utterance.pitch = emotion === "happy" ? 1.1 : emotion === "serious" ? 0.85 : 1.0;
       utterance.volume = 1.0;
@@ -497,20 +258,23 @@ function ChatSection({
       window.speechSynthesis.speak(utterance);
     };
     speakChunk();
-  }, []);
+  };
 
-  // ===== GOOGLE TRANSLATE TTS =====
+  // ===== GOOGLE TRANSLATE TTS (Last resort) =====
   const speakWithGoogleTTS = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
-    const chunks = splitUrduChunks(text);
+    console.log("[JARVIS] Trying Google Translate TTS...");
+    const chunks = splitTextChunks(text, 180);
     let chunkIndex = 0;
     setIsSpeaking(true);
     isSpeakingRef.current = true;
     speakQueueRef.current = true;
+    setTtsProvider("Google TTS (روبوٹک)");
     const playChunk = () => {
       if (!speakQueueRef.current || chunkIndex >= chunks.length) {
         setIsSpeaking(false);
         isSpeakingRef.current = false;
         speakQueueRef.current = false;
+        setTtsProvider("");
         onDone?.();
         return;
       }
@@ -522,12 +286,22 @@ function ChatSection({
       audio.crossOrigin = "anonymous";
       audio.src = url;
       currentAudioRef.current = audio;
-      audio.onended = () => { currentAudioRef.current = null; chunkIndex++; playChunk(); };
-      audio.onerror = () => { currentAudioRef.current = null; speakWithBrowser(text, "ur", emotion, null, onDone); };
-      audio.play().catch(() => { currentAudioRef.current = null; speakWithBrowser(text, "ur", emotion, null, onDone); });
+      audio.onended = () => {
+        currentAudioRef.current = null;
+        chunkIndex++;
+        playChunk();
+      };
+      audio.onerror = () => {
+        currentAudioRef.current = null;
+        speakWithBrowser(text, "ur", emotion, null, onDone);
+      };
+      audio.play().catch(() => {
+        currentAudioRef.current = null;
+        speakWithBrowser(text, "ur", emotion, null, onDone);
+      });
     };
     playChunk();
-  }, [speakWithBrowser]);
+  }, []);
 
   // ===== URDU FALLBACK =====
   const speakUrduFallback = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
@@ -535,23 +309,28 @@ function ChatSection({
     const arabicVoice = voices.find(v => v.lang === "ar-SA" && v.name.includes("Google")) ||
                         voices.find(v => v.lang.startsWith("ar") && v.name.includes("Google")) ||
                         voices.find(v => v.lang.startsWith("ar"));
-    if (arabicVoice) { speakWithBrowser(text, "ur", emotion, arabicVoice, onDone); return; }
+    if (arabicVoice) {
+      speakWithBrowser(text, "ur", emotion, arabicVoice, onDone);
+      return;
+    }
     speakWithGoogleTTS(text, emotion, onDone);
-  }, [speakWithBrowser, speakWithGoogleTTS]);
+  }, [speakWithGoogleTTS]);
 
   // ===== URDU CLOUD TTS =====
   const speakUrduCloud = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
-    const chunks = splitUrduChunks(text);
+    const chunks = splitTextChunks(text, 180);
     let chunkIndex = 0;
     let failed = false;
     setIsSpeaking(true);
     isSpeakingRef.current = true;
     speakQueueRef.current = true;
+    setTtsProvider("Chrome Urdu");
     const speakChunk = () => {
       if (!speakQueueRef.current || chunkIndex >= chunks.length || failed) {
         setIsSpeaking(false);
         isSpeakingRef.current = false;
         speakQueueRef.current = false;
+        setTtsProvider("");
         onDone?.();
         return;
       }
@@ -564,87 +343,229 @@ function ChatSection({
       utterance.volume = 1.0;
       const timeout = setTimeout(() => {
         if (!failed && !window.speechSynthesis.speaking && !window.speechSynthesis.pending) {
-          failed = true; window.speechSynthesis.cancel(); speakUrduFallback(text, emotion, onDone);
+          failed = true;
+          window.speechSynthesis.cancel();
+          speakUrduFallback(text, emotion, onDone);
         }
       }, 3500);
-      utterance.onend = () => { clearTimeout(timeout); chunkIndex++; speakChunk(); };
+      utterance.onend = () => {
+        clearTimeout(timeout);
+        chunkIndex++;
+        speakChunk();
+      };
       utterance.onerror = () => {
         clearTimeout(timeout);
-        if (!failed) { failed = true; speakUrduFallback(text, emotion, onDone); }
+        if (!failed) {
+          failed = true;
+          speakUrduFallback(text, emotion, onDone);
+        }
       };
       window.speechSynthesis.speak(utterance);
     };
     speakChunk();
   }, [speakUrduFallback]);
 
-  // ===== SERVER-SIDE TTS =====
+  // ===== SERVER-SIDE TTS — NATURAL VOICE =====
   const speakServerTTS = useCallback(async (text: string, lang: "ur" | "en" | "mixed", emotion: EmotionType, onDone?: () => void) => {
     setIsSpeaking(true);
     isSpeakingRef.current = true;
     speakQueueRef.current = true;
+
     try {
-      const chunks = (lang === "ur" || lang === "mixed") ? splitUrduChunks(text) :
-        text.match(new RegExp(`.{1,300}[.!?\\n]|.{1,300}`, "g")) || [text];
+      const maxChunkLen = 4000;
+      const chunks = splitTextChunks(text, maxChunkLen);
       let chunkIndex = 0;
+
       const playChunk = async () => {
         if (!speakQueueRef.current || chunkIndex >= chunks.length) {
           setIsSpeaking(false);
           isSpeakingRef.current = false;
           speakQueueRef.current = false;
+          setTtsProvider("");
           onDone?.();
           return;
         }
+
         const chunk = chunks[chunkIndex].trim();
         if (!chunk) { chunkIndex++; await playChunk(); return; }
+
         try {
+          // Get ALL TTS keys
           const elevenlabsKey = localStorage.getItem("jarvis_elevenlabs_key") || "";
           const sarvamKey = localStorage.getItem("jarvis_sarvam_key") || "";
           const openaiKey = localStorage.getItem("jarvis_openai_tts_key") ||
             (localStorage.getItem("jarvis_api_keys") ?
               JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") || "";
+
           const allOpenAIKeys = [openaiKey, localStorage.getItem("jarvis_openai_extra_keys") || ""]
             .join(",").split(",").map(k => k.trim()).filter(k => k.length > 0).join(",");
+
+          console.log(`[JARVIS] TTS request: lang=${lang}, elevenlabs=${elevenlabsKey ? "YES" : "NO"}, sarvam=${sarvamKey ? "YES" : "NO"}, openai=${allOpenAIKeys ? "YES" : "NO"}`);
+
+          const savedClonedVoiceId = localStorage.getItem("jarvis_cloned_voice_id") || "";
+
           const res = await fetch("/api/tts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               text: chunk.substring(0, 5000),
               lang: (lang === "ur" || lang === "mixed") ? "ur" : "en",
-              emotion,
+              emotion: emotion,
               elevenlabsKey: elevenlabsKey || undefined,
               sarvamKey: sarvamKey || undefined,
               openaiKey: allOpenAIKeys || undefined,
+              clonedVoiceId: savedClonedVoiceId || undefined,
+              testMode: true,
             }),
           });
+
           if (res.ok) {
             const contentType = res.headers.get("content-type") || "";
             if (contentType.includes("audio") || contentType.includes("mpeg") || contentType.includes("wav")) {
+              const provider = res.headers.get("X-TTS-Provider") || "unknown";
+              console.log(`[JARVIS] TTS using: ${provider}, chunk ${chunkIndex + 1}/${chunks.length}`);
+              setTtsProvider(provider);
               const blob = await res.blob();
               const url = URL.createObjectURL(blob);
               const audio = new Audio(url);
               currentAudioRef.current = audio;
-              audio.onended = () => { currentAudioRef.current = null; URL.revokeObjectURL(url); chunkIndex++; playChunk(); };
-              audio.onerror = () => { currentAudioRef.current = null; URL.revokeObjectURL(url); chunkIndex++; playChunk(); };
+
+              audio.onended = () => {
+                currentAudioRef.current = null;
+                URL.revokeObjectURL(url);
+                chunkIndex++;
+                playChunk();
+              };
+
+              audio.onerror = () => {
+                currentAudioRef.current = null;
+                URL.revokeObjectURL(url);
+                chunkIndex++;
+                playChunk();
+              };
+
               await audio.play();
               return;
             }
           }
-          chunkIndex++;
-          await playChunk();
-        } catch {
-          if (lang === "ur" || lang === "mixed") { speakUrduCloud(text, emotion, onDone); }
-          else { speakWithBrowser(text, "en", emotion, null, onDone); }
+          // Server TTS failed — get debug info
+          let errorDetail = "";
+          try {
+            const errorJson = await res.json();
+            errorDetail = errorJson.debug ? errorJson.debug.join("\n") : JSON.stringify(errorJson);
+            console.warn(`[JARVIS] Server TTS FAILED! Debug:\n${errorDetail}`);
+            // Show debug info to user
+            setTtsTestResult(`❌ TTS فیل! تفصیلات:\n${errorDetail}`);
+          } catch {
+            try { errorDetail = await res.text(); } catch {}
+            console.warn(`[JARVIS] Server TTS failed (status: ${res.status}): ${errorDetail.substring(0, 200)}`);
+          }
+          
+          // Fall back to browser TTS for remaining text
+          const remainingText = chunks.slice(chunkIndex).join(" ").trim();
+          if (remainingText) {
+            if (lang === "ur" || lang === "mixed") {
+              speakUrduCloud(remainingText, emotion, onDone);
+            } else {
+              speakWithBrowser(remainingText, "en", emotion, null, onDone);
+            }
+          } else {
+            setIsSpeaking(false);
+            isSpeakingRef.current = false;
+            speakQueueRef.current = false;
+            setTtsProvider("");
+            onDone?.();
+          }
+          return;
+        } catch (err) {
+          console.warn("[JARVIS] Server TTS error:", err);
+          if (lang === "ur" || lang === "mixed") {
+            speakUrduCloud(text, emotion, onDone);
+          } else {
+            speakWithBrowser(text, "en", emotion, null, onDone);
+          }
+          return;
         }
       };
+
       await playChunk();
     } catch {
       setIsSpeaking(false);
       isSpeakingRef.current = false;
       speakQueueRef.current = false;
-      if (lang === "ur" || lang === "mixed") { speakUrduCloud(text, emotion, onDone); }
-      else { speakWithBrowser(text, "en", emotion, null, onDone); }
+      setTtsProvider("");
+      if (lang === "ur" || lang === "mixed") {
+        speakUrduCloud(text, emotion, onDone);
+      } else {
+        speakWithBrowser(text, "en", emotion, null, onDone);
+      }
     }
   }, [speakUrduCloud, speakWithBrowser]);
+
+  // ===== TEST TTS — Diagnose why natural voice isn't working =====
+  const testTTS = useCallback(async () => {
+    setTtsTesting(true);
+    setTtsTestResult("🔄 ٹیسٹ جاری ہے...");
+
+    try {
+      const elevenlabsKey = localStorage.getItem("jarvis_elevenlabs_key") || "";
+      const sarvamKey = localStorage.getItem("jarvis_sarvam_key") || "";
+      const openaiKey = localStorage.getItem("jarvis_openai_tts_key") ||
+        (localStorage.getItem("jarvis_api_keys") ?
+          JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") || "";
+      const allOpenAIKeys = [openaiKey, localStorage.getItem("jarvis_openai_extra_keys") || ""]
+        .join(",").split(",").map(k => k.trim()).filter(k => k.length > 0).join(",");
+
+      const testText = "سلام، میں جاروس ہوں، آپ کا ذاتی ساتھی";
+      
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: testText,
+          lang: "ur",
+          emotion: "normal",
+          elevenlabsKey: elevenlabsKey || undefined,
+          sarvamKey: sarvamKey || undefined,
+          openaiKey: allOpenAIKeys || undefined,
+        }),
+      });
+
+      if (res.ok) {
+        const contentType = res.headers.get("content-type") || "";
+        const provider = res.headers.get("X-TTS-Provider") || "unknown";
+        const debugHeader = res.headers.get("X-TTS-Debug") || "";
+        
+        if (contentType.includes("audio")) {
+          const blob = await res.blob();
+          // Play the test audio
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          audio.onended = () => URL.revokeObjectURL(url);
+          audio.play();
+          
+          setTtsTestResult(`✅ کامیاب! آواز: ${provider}\n${debugHeader ? "Debug: " + decodeURIComponent(debugHeader) : ""}`);
+        } else {
+          // JSON response (error)
+          const json = await res.json();
+          setTtsTestResult(`⚠️ غیر متوقع جواب: ${JSON.stringify(json).substring(0, 500)}`);
+        }
+      } else {
+        // Error response - get debug info
+        try {
+          const errorJson = await res.json();
+          const debugLines = errorJson.debug || [];
+          setTtsTestResult(`❌ TTS فیل! تفصیلات:\n${debugLines.join("\n")}`);
+        } catch {
+          setTtsTestResult(`❌ HTTP Error ${res.status}`);
+        }
+      }
+    } catch (err: any) {
+      setTtsTestResult(`❌ نیٹورک ایرر: ${err?.message || err}`);
+    } finally {
+      setTtsTesting(false);
+    }
+  }, []);
 
   // ===== TTS — Urdu/English Smart =====
   const speakText = useCallback((text: string, emotion: EmotionType, onDone?: () => void) => {
@@ -661,70 +582,410 @@ function ChatSection({
       .trim();
     if (!cleanText) { onDone?.(); return; }
     const lang = detectLanguage(cleanText);
+
     if (lang === "ur" || lang === "mixed") {
-      speakServerTTS(cleanText, "ur", emotion, onDone);
+      // Urdu — use happy emotion for warm, natural tone
+      speakServerTTS(cleanText, "ur", "happy", onDone);
     } else {
       const hasAnyTTSKey = localStorage.getItem("jarvis_elevenlabs_key") ||
         localStorage.getItem("jarvis_sarvam_key") ||
         localStorage.getItem("jarvis_openai_tts_key") ||
         (localStorage.getItem("jarvis_api_keys") ?
           JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "");
-      if (hasAnyTTSKey) { speakServerTTS(cleanText, "en", emotion, onDone); }
-      else {
+      if (hasAnyTTSKey) {
+        speakServerTTS(cleanText, "en", emotion, onDone);
+      } else {
         const voices = window.speechSynthesis.getVoices();
-        const selectedVoice = voices.find(v => v.lang.startsWith("en") && v.name.includes("Google") && !v.localService)
-          || voices.find(v => v.lang.startsWith("en-US")) || null;
+        const selectedVoice = voices.find(v =>
+          v.lang.startsWith("en") && v.name.includes("Google") && !v.localService
+        ) || voices.find(v =>
+          v.lang.startsWith("en-US") && v.name.includes("Google")
+        ) || voices.find(v =>
+          v.lang.startsWith("en") && v.name.includes("Google")
+        ) || voices.find(v => v.lang.startsWith("en-US")) ||
+          voices.find(v => v.lang.startsWith("en")) || null;
         speakWithBrowser(cleanText, "en", emotion, selectedVoice, onDone);
       }
     }
-  }, [cancelAllSpeech, speakServerTTS, speakWithBrowser]);
+  }, [cancelAllSpeech, speakServerTTS]);
 
-  // ===== STT =====
+  // ===== VOICE CLONING SYSTEM — اپنی آواز کلون کرنا =====
+  const startVoiceCloneRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      mediaRecorderRef.current = mediaRecorder;
+      voiceChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) voiceChunksRef.current.push(e.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(voiceChunksRef.current, { type: "audio/webm" });
+        const reader = new FileReader();
+        reader.onload = () => {
+          const base64 = reader.result as string;
+          setVoiceCloneSamples(prev => [...prev, base64]);
+        };
+        reader.readAsDataURL(blob);
+      };
+
+      mediaRecorder.start();
+      setVoiceCloneRecording(true);
+    } catch (err: any) {
+      alert("مائیک رس نہیں ہو سکا: " + (err?.message || err));
+    }
+  }, []);
+
+  const stopVoiceCloneRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop();
+      setVoiceCloneRecording(false);
+    }
+  }, []);
+
+  const cloneMyVoice = useCallback(async () => {
+    if (voiceCloneSamples.length === 0) {
+      alert("پہلے اپنی آواز ریکارڈ کریں — کم از کم 3 نمونے چاہیے");
+      return;
+    }
+
+    const elevenlabsKey = localStorage.getItem("jarvis_elevenlabs_key") || "";
+    if (!elevenlabsKey) {
+      alert("ElevenLabs API Key چاہیے وائس کلوننگ کے لیے۔ Settings میں ڈالیں۔");
+      return;
+    }
+
+    setVoiceCloneStatus("🔄 آواز کلون ہو رہی ہے...");
+
+    try {
+      const res = await fetch("/api/voice-clone", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "clone",
+          elevenlabsKey,
+          voiceName: "JARVIS My Voice",
+          voiceDescription: "My personal voice for JARVIS — natural, emotional, romantic Urdu/English speaking style",
+          voiceSamples: voiceCloneSamples,
+        }),
+      });
+
+      const data = await res.json();
+      if (data.success && data.voice_id) {
+        setClonedVoiceId(data.voice_id);
+        localStorage.setItem("jarvis_cloned_voice_id", data.voice_id);
+        setVoiceCloneStatus(`✅ آواز کامیابی سے کلون ہو گئی! Voice ID: ${data.voice_id}`);
+      } else {
+        setVoiceCloneStatus(`❌ ${data.message || "کلوننگ فیل ہوئی"}`);
+      }
+    } catch (err: any) {
+      setVoiceCloneStatus(`❌ ایرر: ${err?.message || err}`);
+    }
+  }, [voiceCloneSamples]);
+
+  const fetchMyVoices = useCallback(async () => {
+    const elevenlabsKey = localStorage.getItem("jarvis_elevenlabs_key") || "";
+    if (!elevenlabsKey) return;
+
+    try {
+      const res = await fetch("/api/voice-clone", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "list_voices", elevenlabsKey }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setDiscoveredVoices(data.voices);
+      }
+    } catch {}
+  }, []);
+
+  const selectClonedVoice = useCallback((voiceId: string) => {
+    setClonedVoiceId(voiceId);
+    localStorage.setItem("jarvis_cloned_voice_id", voiceId);
+    setVoiceCloneStatus(`✅ آواز سیٹ ہو گئی! Voice ID: ${voiceId}`);
+  }, []);
+
+  // ===== STORY RECORDING SYSTEM =====
+  const recordStory = useCallback(async (storyText: string, title: string) => {
+    if (!storyText.trim()) return;
+    setIsRecordingStory(true);
+
+    try {
+      const elevenlabsKey = localStorage.getItem("jarvis_elevenlabs_key") || "";
+      const sarvamKey = localStorage.getItem("jarvis_sarvam_key") || "";
+      const openaiKey = localStorage.getItem("jarvis_openai_tts_key") ||
+        (localStorage.getItem("jarvis_api_keys") ?
+          JSON.parse(localStorage.getItem("jarvis_api_keys") || "{}").openai : "") || "";
+      const allOpenAIKeys = [openaiKey, localStorage.getItem("jarvis_openai_extra_keys") || ""]
+        .join(",").split(",").map(k => k.trim()).filter(k => k.length > 0).join(",");
+
+      // For story, always use Urdu for natural narration
+      const lang = detectLanguage(storyText);
+      const ttsLang = (lang === "ur" || lang === "mixed") ? "ur" : "en";
+
+      const chunks = splitTextChunks(storyText, 4000);
+      const audioBlobs: Blob[] = [];
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i].trim();
+        if (!chunk) continue;
+
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: chunk.substring(0, 5000),
+            lang: ttsLang,
+            emotion: "normal",
+            elevenlabsKey: elevenlabsKey || undefined,
+            sarvamKey: sarvamKey || undefined,
+            openaiKey: allOpenAIKeys || undefined,
+          }),
+        });
+
+        if (res.ok) {
+          const contentType = res.headers.get("content-type") || "";
+          if (contentType.includes("audio") || contentType.includes("mpeg") || contentType.includes("wav")) {
+            const blob = await res.blob();
+            audioBlobs.push(blob);
+            console.log(`[STORY] Chunk ${i + 1}/${chunks.length} recorded, provider: ${res.headers.get("X-TTS-Provider")}`);
+          }
+        }
+      }
+
+      if (audioBlobs.length > 0) {
+        // Merge all audio blobs into one
+        const combinedBlob = new Blob(audioBlobs, { type: "audio/mpeg" });
+        const url = URL.createObjectURL(combinedBlob);
+
+        // Create download link
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${title || "story"}_${Date.now()}.mp3`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+
+        // Also save to localStorage for "library"
+        const storyData = {
+          title: title || "بے نام کہانی",
+          date: new Date().toISOString(),
+          audioUrl: url,
+          textPreview: storyText.substring(0, 200),
+        };
+        const existingStories = JSON.parse(localStorage.getItem("jarvis_stories") || "[]");
+        existingStories.push(storyData);
+        localStorage.setItem("jarvis_stories", JSON.stringify(existingStories));
+
+        console.log(`[STORY] Story recorded successfully! ${audioBlobs.length} chunks`);
+      } else {
+        alert("کہانی ریکارڈ نہیں ہو سکی۔ براہ کرم TTS API keys چیک کریں۔");
+      }
+    } catch (err) {
+      console.error("[STORY] Recording error:", err);
+      alert("کہانی ریکارڈ کرنے میں مسئلہ ہوا۔");
+    } finally {
+      setIsRecordingStory(false);
+    }
+  }, []);
+
+  // ===== CLOUD STT — Transcribe Audio via /api/stt =====
+  const transcribeAudio = useCallback(async (audioBlob: Blob, autoSend: boolean) => {
+    try {
+      console.log(`[JARVIS STT] Transcribing audio: ${audioBlob.size} bytes, type: ${audioBlob.type}`);
+      const reader = new FileReader();
+      const base64Promise = new Promise<string>((resolve, reject) => {
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(audioBlob);
+      });
+      const base64Audio = await base64Promise;
+      if (!base64Audio || base64Audio.length < 100) {
+        console.warn("[JARVIS STT] Audio too short");
+        setIsRecording(false); setIsListening(false);
+        if (conversationModeRef.current && !isLoadingRef.current) {
+          setTimeout(() => { if (conversationModeRef.current && !isSpeakingRef.current) startListeningRef.current(true); }, 500);
+        }
+        return;
+      }
+      const savedKeys = localStorage.getItem("jarvis_api_keys");
+      const parsedKeys = savedKeys ? JSON.parse(savedKeys) : {};
+      const groqKey = parsedKeys.groq || "";
+      const openaiKey = parsedKeys.openai || "";
+      if (!groqKey && !openaiKey) {
+        setIsRecording(false); setIsListening(false);
+        alert("آواز سننے کے لیے Groq یا OpenAI API Key چاہیے۔ Settings میں ڈالیں۔");
+        return;
+      }
+      setIsListening(true);
+      const res = await fetch("/api/stt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audio: base64Audio, mimeType: audioBlob.type || "audio/webm", language: undefined, groqKey: groqKey || undefined, openaiKey: openaiKey || undefined }),
+      });
+      const data = await res.json();
+      if (data.success && data.text && data.text.trim()) {
+        const transcribedText = data.text.trim();
+        console.log(`[JARVIS STT] Transcribed (${data.provider}): "${transcribedText}"`);
+        setInput(transcribedText);
+        if (autoSend || conversationModeRef.current) {
+          setTimeout(() => sendMessageDirectRef.current(transcribedText), 200);
+        }
+      } else {
+        if (conversationModeRef.current && !isLoadingRef.current) {
+          setTimeout(() => { if (conversationModeRef.current && !isSpeakingRef.current) startListeningRef.current(true); }, 500);
+        }
+      }
+    } catch (err) {
+      console.error("[JARVIS STT] Transcription error:", err);
+      if (conversationModeRef.current && !isLoadingRef.current) {
+        setTimeout(() => { if (conversationModeRef.current && !isSpeakingRef.current) startListeningRef.current(true); }, 800);
+      }
+    } finally {
+      setIsRecording(false); setIsListening(false);
+    }
+  }, []);
+
+  // ===== CLOUD STT — Stop Recording and Transcribe =====
+  const stopCloudListeningAndTranscribe = useCallback(() => {
+    if (sttSilenceTimerRef.current) { clearTimeout(sttSilenceTimerRef.current); sttSilenceTimerRef.current = null; }
+    if (sttMediaRecorderRef.current && sttMediaRecorderRef.current.state === "recording") { sttMediaRecorderRef.current.stop(); }
+  }, []);
+
+  // ===== STT — Start Listening (Dual Path: Chrome STT or Cloud Whisper STT) =====
   const startListening = useCallback((autoSend: boolean = false) => {
     if (isRecording) return;
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) { alert("Speech recognition requires Chrome browser."); return; }
+
+    // In Electron, ALWAYS use Cloud Whisper STT (webkitSpeechRecognition doesn't work properly in Electron)
+    const SpeechRecognition = isElectron() ? null : ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
+    if (!SpeechRecognition) {
+      // Use Cloud Whisper STT for Electron/Firefox
+      console.log("[JARVIS STT] Using Cloud Whisper STT");
+      sttAutoSendRef.current = autoSend;
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then((stream) => {
+          sttStreamRef.current = stream;
+          sttChunksRef.current = [];
+          const mimeTypes = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
+          let selectedMime = "";
+          for (const mime of mimeTypes) { if (MediaRecorder.isTypeSupported(mime)) { selectedMime = mime; break; } }
+          const mediaRecorder = new MediaRecorder(stream, selectedMime ? { mimeType: selectedMime } : undefined);
+          sttMediaRecorderRef.current = mediaRecorder;
+          mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) sttChunksRef.current.push(e.data); };
+          mediaRecorder.onstop = () => {
+            if (sttStreamRef.current) { sttStreamRef.current.getTracks().forEach(t => t.stop()); sttStreamRef.current = null; }
+            if (sttChunksRef.current.length > 0) {
+              const audioBlob = new Blob(sttChunksRef.current, { type: selectedMime || "audio/webm" });
+              transcribeAudio(audioBlob, sttAutoSendRef.current);
+            } else {
+              setIsRecording(false); setIsListening(false);
+              if (conversationModeRef.current && !isLoadingRef.current) {
+                setTimeout(() => { if (conversationModeRef.current && !isSpeakingRef.current) startListeningRef.current(true); }, 500);
+              }
+            }
+            sttMediaRecorderRef.current = null;
+          };
+          mediaRecorder.onerror = () => { setIsRecording(false); setIsListening(false); };
+          mediaRecorder.start(500);
+          setIsRecording(true); setIsListening(true);
+          console.log(`[JARVIS STT] Recording started (mime: ${selectedMime || "default"})`);
+          // Silence detection
+          try {
+            const audioContext = new AudioContext();
+            sttAudioContextRef.current = audioContext;
+            const source = audioContext.createMediaStreamSource(stream);
+            const analyser = audioContext.createAnalyser();
+            analyser.fftSize = 2048;
+            source.connect(analyser);
+            sttAnalyserRef.current = analyser;
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            let silenceStart = Date.now();
+            let hasSpeech = false;
+            const detectSilence = () => {
+              if (!sttMediaRecorderRef.current || sttMediaRecorderRef.current.state !== "recording") return;
+              analyser.getByteFrequencyData(dataArray);
+              const average = dataArray.reduce((a, b) => a + b, 0) / bufferLength;
+              if (average > 10) { silenceStart = Date.now(); hasSpeech = true; }
+              else if (hasSpeech) {
+                const silenceDuration = Date.now() - silenceStart;
+                const convSilenceTimeout = conversationModeRef.current ? 4000 : 2500;
+                if (silenceDuration > convSilenceTimeout) { stopCloudListeningAndTranscribe(); return; }
+              }
+              if (Date.now() - silenceStart > 30000 && !hasSpeech) { stopCloudListeningAndTranscribe(); return; }
+              requestAnimationFrame(detectSilence);
+            };
+            detectSilence();
+          } catch {
+            sttSilenceTimerRef.current = setTimeout(() => { stopCloudListeningAndTranscribe(); }, conversationModeRef.current ? 8000 : 6000);
+          }
+        })
+        .catch((err) => {
+          console.error("[JARVIS STT] Microphone access denied:", err);
+          setIsRecording(false); setIsListening(false);
+          alert("مائیکروفون رس نہیں ہو سکا۔ براہ کرم مائیکروفون کی اجازت دیں۔\n\nError: " + (err?.message || err));
+        });
+      return;
+    }
+
     cancelAllSpeech();
+
     const recognition = new SpeechRecognition();
     recognition.lang = "ur-PK";
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.maxAlternatives = 1;
+
     let silenceTimer: NodeJS.Timeout | null = null;
     let lastTranscript = "";
     let hasFinalResult = false;
     const convSilenceTimeout = conversationModeRef.current ? 4000 : 2500;
+
     const resetSilenceTimer = () => {
       if (silenceTimer) clearTimeout(silenceTimer);
       silenceTimer = setTimeout(() => {
         if (lastTranscript.trim() && !hasFinalResult) {
           hasFinalResult = true;
           const finalTranscript = lastTranscript.trim();
-          setIsRecording(false); setIsListening(false); setInput(finalTranscript);
+          setIsRecording(false);
+          setIsListening(false);
+          setInput(finalTranscript);
           try { recognition.stop(); } catch {}
           if (autoSend || conversationModeRef.current) {
-            setTimeout(() => sendMessageDirect(finalTranscript), 200);
+            setTimeout(() => sendMessageDirectRef.current(finalTranscript), 200);
           }
         } else if (!lastTranscript.trim() && conversationModeRef.current) {
           hasFinalResult = false;
         }
       }, convSilenceTimeout);
     };
+
     recognition.onresult = (event: any) => {
       let interimTranscript = "";
       let finalTranscript = "";
+
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
-        if (result.isFinal) finalTranscript += result[0].transcript;
-        else interimTranscript += result[0].transcript;
+        if (result.isFinal) {
+          finalTranscript += result[0].transcript;
+        } else {
+          interimTranscript += result[0].transcript;
+        }
       }
+
       if (finalTranscript) {
         lastTranscript = finalTranscript;
         hasFinalResult = true;
-        setIsRecording(false); setIsListening(false); setInput(finalTranscript.trim());
+        setIsRecording(false);
+        setIsListening(false);
+        setInput(finalTranscript.trim());
         try { recognition.stop(); } catch {}
         if (autoSend || conversationModeRef.current) {
-          setTimeout(() => sendMessageDirect(finalTranscript.trim()), 200);
+          setTimeout(() => sendMessageDirectRef.current(finalTranscript.trim()), 200);
         }
       } else if (interimTranscript) {
         lastTranscript = interimTranscript;
@@ -732,71 +993,187 @@ function ChatSection({
         resetSilenceTimer();
       }
     };
+
     recognition.onerror = (event: any) => {
       if (silenceTimer) clearTimeout(silenceTimer);
-      setIsRecording(false); setIsListening(false);
+      setIsRecording(false);
+      setIsListening(false);
       if (conversationModeRef.current && event.error !== "not-allowed" && event.error !== "aborted") {
         setTimeout(() => {
-          if (conversationModeRef.current && !isLoadingRef.current && !isSpeakingRef.current) startListening(true);
+          if (conversationModeRef.current && !isLoadingRef.current && !isSpeakingRef.current) {
+            startListeningRef.current(true);
+          }
         }, 800);
       }
     };
+
     recognition.onend = () => {
       if (silenceTimer) clearTimeout(silenceTimer);
       if (conversationModeRef.current && !hasFinalResult && !isLoadingRef.current) {
-        setTimeout(() => { if (conversationModeRef.current && !isSpeakingRef.current) startListening(true); }, 300);
+        setTimeout(() => {
+          if (conversationModeRef.current && !isSpeakingRef.current) {
+            startListeningRef.current(true);
+          }
+        }, 300);
         return;
       }
-      setIsRecording(false); setIsListening(false);
+      setIsRecording(false);
+      setIsListening(false);
     };
+
     recognitionRef.current = recognition;
     recognition.start();
-    setIsRecording(true); setIsListening(true);
+    setIsRecording(true);
+    setIsListening(true);
     resetSilenceTimer();
-  }, [isRecording, cancelAllSpeech]);
+  }, [isRecording, cancelAllSpeech, transcribeAudio, stopCloudListeningAndTranscribe]);
+
+  // ===== STOP ALL LISTENING — Both Chrome STT and Cloud STT =====
+  const stopAllListening = useCallback(() => {
+    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch {} }
+    if (sttMediaRecorderRef.current && sttMediaRecorderRef.current.state === "recording") { sttMediaRecorderRef.current.stop(); }
+    if (sttStreamRef.current) { sttStreamRef.current.getTracks().forEach(t => t.stop()); sttStreamRef.current = null; }
+    if (sttSilenceTimerRef.current) { clearTimeout(sttSilenceTimerRef.current); sttSilenceTimerRef.current = null; }
+    if (sttAudioContextRef.current) { try { sttAudioContextRef.current.close(); } catch {} sttAudioContextRef.current = null; }
+    setIsRecording(false); setIsListening(false);
+  }, []);
+
+  // ===== PRE-SCAN ACTION SYSTEM — Execute actions BEFORE AI call =====
+  const preScanAndExecuteAction = useCallback(async (text: string): Promise<{ actionExecuted: boolean; actionDescription: string; modifiedMessage: string }> => {
+    const electron = getElectronAPI();
+    if (!electron) return { actionExecuted: false, actionDescription: "", modifiedMessage: text };
+
+    const lower = text.toLowerCase();
+    let query = '';
+
+    // YouTube / Video
+    if (/(یوٹیوب|youtube)\s*(کھول|open|چلاؤ|لگاؤ|play|شروع|سروچ|search)/i.test(lower) ||
+        /(یوٹیوب|youtube)\s*(تلاوت|tilawat|قرآن|quran|اذان|azan|نعت|naat|حمد|hamd)/i.test(lower)) {
+      if (/تلاوت|tilawat|قرآن|quran/i.test(lower)) query = 'Quran Tilawat with Urdu Translation';
+      else if (/اذان|azan/i.test(lower)) query = 'Beautiful Azan - Adhan';
+      else if (/نعت|naat/i.test(lower)) query = 'Beautiful Naat Sharif';
+      else if (/حمد|hamd/i.test(lower)) query = 'Hamd e Bari Taala';
+      else {
+        const ytMatch = lower.match(/(?:یوٹیوب|youtube)\s*(?:پر|on)?\s*(?:کھول|open|چلاؤ|لگاؤ|play|شروع|سروچ|search)?\s*(.*)/i);
+        query = ytMatch?.[1] || lower.replace(/یوٹیوب|youtube|کھول|open|چلاؤ|لگاؤ|play|شروع|پر|سروچ|search/gi, '').trim() || 'Islamic';
+      }
+      try { await electron.searchYoutube(query); } catch {}
+      return { actionExecuted: true, actionDescription: `YouTube پر "${query}" کھول دیا`, modifiedMessage: `میں نے یوٹیوب پر ${query} کھولنے کو کہا تھا، اب مختصر جواب دو` };
+    }
+
+    // Play audio/music
+    if (/(چلاؤ|لگاؤ|play|شروع|بجاؤ)\s*(گانا|song|میوزک|music|آڈیو|audio|اذان|azan|تلاوت|tilawat|نعت|naat|ویدیو|video)/i.test(lower)) {
+      if (/تلاوت|tilawat|قرآن/i.test(lower)) query = 'Quran Tilawat';
+      else if (/اذان|azan/i.test(lower)) query = 'Beautiful Azan';
+      else if (/نعت|naat/i.test(lower)) query = 'Naat Sharif Urdu';
+      else { const m = lower.match(/(?:چلاؤ|لگاؤ|play|شروع|بجاؤ)\s+(.*)/i); query = m?.[1] || 'Islamic audio'; }
+      try { await electron.searchYoutube(query); } catch {}
+      return { actionExecuted: true, actionDescription: `"${query}" چلا دیا`, modifiedMessage: `میں نے ${query} چلانے کو کہا تھا، اب مختصر جواب دو` };
+    }
+
+    // Open URL/website
+    const urlMatch = lower.match(/(?:کھول|open|چلاؤ|جواؤ)\s*(https?:\/\/\S+)/i) || lower.match(/(?:کھول|open|چلاؤ)\s*(?:وہبسائٹ|website|site)\s+(\S+)/i);
+    if (urlMatch) {
+      let url = urlMatch[1] || urlMatch[0];
+      if (!url.startsWith('http')) url = 'https://' + url;
+      try { await electron.openUrl(url); } catch {}
+      return { actionExecuted: true, actionDescription: `${url} کھول دیا`, modifiedMessage: `میں نے ${url} کھولنے کو کہا تھا، اب مختصر جواب دو` };
+    }
+
+    // Open app
+    const appMatch = lower.match(/(?:کھول|open|چلاؤ|شروع)\s*(?:ایپ|app|سافٹویئر|program|ایپلیکیشن)?\s*(chrome|notepad|calculator|paint|word|excel|vscode|code|telegram|whatsapp|firefox|spotify|vlc|discord)/i);
+    if (appMatch) {
+      try { await electron.openApp(appMatch[1]); } catch {}
+      return { actionExecuted: true, actionDescription: `${appMatch[1]} کھول دیا`, modifiedMessage: `میں نے ${appMatch[1]} کھولنے کو کہا تھا، اب مختصر جواب دو` };
+    }
+
+    // System commands
+    if (/شٹ\s*ڈاؤن|shutdown|بند\s*کرو/i.test(lower)) { try { await electron.systemCommand('shutdown'); } catch {} return { actionExecuted: true, actionDescription: "شٹ ڈاؤن شروع کر دیا", modifiedMessage: "شٹ ڈاؤن کا حکم دیا، اب مختصر جواب دو" }; }
+    if (/ری\s*سٹارٹ|restart|دوبارہ\s*شروع/i.test(lower)) { try { await electron.systemCommand('restart'); } catch {} return { actionExecuted: true, actionDescription: "ری سٹارٹ شروع کر دیا", modifiedMessage: "ری سٹارٹ کا حکم دیا، اب مختصر جواب دو" }; }
+    if (/سلیپ|sleep/i.test(lower)) { try { await electron.systemCommand('sleep'); } catch {} return { actionExecuted: true, actionDescription: "سلیپ موڈ", modifiedMessage: "سلیپ کا حکم دیا، اب مختصر جواب دو" }; }
+    if (/لاک|lock/i.test(lower)) { try { await electron.systemCommand('lock'); } catch {} return { actionExecuted: true, actionDescription: "سسٹم لاک", modifiedMessage: "لاک کا حکم دیا، اب مختصر جواب دو" }; }
+    if (/والیوم\s*اپ|volume\s*up|آواز\s*زیادہ/i.test(lower)) { try { await electron.systemCommand('volume-up'); } catch {} return { actionExecuted: true, actionDescription: "والیوم بڑھا دیا", modifiedMessage: "والیوم اپ کا حکم دیا، اب مختصر جواب دو" }; }
+    if (/والیوم\s*ڈاؤن|volume\s*down|آواز\s*کم/i.test(lower)) { try { await electron.systemCommand('volume-down'); } catch {} return { actionExecuted: true, actionDescription: "والیوم کم کر دیا", modifiedMessage: "والیوم ڈاؤن کا حکم دیا، اب مختصر جواب دو" }; }
+    if (/(مائیوٹ|میوٹ|خاموش|mute|silent)/i.test(lower)) { try { await electron.systemCommand('mute'); } catch {} return { actionExecuted: true, actionDescription: "خاموش کر دیا", modifiedMessage: "میوٹ کا حکم دیا، اب مختصر جواب دو" }; }
+
+    // Open folder
+    const folderMatch = lower.match(/(?:فولڈر|folder|ڈائرکٹری)\s+(.*)/i);
+    if (folderMatch) { try { await electron.openFolder(folderMatch[1].trim()); } catch {} return { actionExecuted: true, actionDescription: `فولڈر کھول دیا: ${folderMatch[1]}`, modifiedMessage: `فولڈر کھولنے کو کہا تھا، اب مختصر جواب دو` }; }
+
+    return { actionExecuted: false, actionDescription: "", modifiedMessage: text };
+  }, []);
 
   // ===== SEND MESSAGE =====
   const sendMessageDirect = useCallback(async (text: string, fileData?: UploadedFile) => {
     if (!text.trim() || isLoadingRef.current) return;
+
     const currentKeys: APIKeys = {
       groq: apiKeys.groq || "", gemini: apiKeys.gemini || "",
       openai: apiKeys.openai || "", zai: apiKeys.zai || "",
-      xai: apiKeys.xai || "", anthropic: apiKeys.anthropic || "",
     };
-    if (!Object.values(currentKeys).some(k => k && k.trim().length > 0)) { setShowSettings(true); return; }
+
+    if (!Object.values(currentKeys).some(k => k && k.trim().length > 0)) {
+      setShowSettings(true);
+      return;
+    }
+
     cancelAllSpeech();
+
     const userMsg: JarvisMessage = {
-      id: `msg_${Date.now()}`, role: "user",
+      id: `msg_${Date.now()}`,
+      role: "user",
       content: fileData ? `[📎 ${fileData.name}]\n${text.trim()}` : text.trim(),
       timestamp: Date.now(),
     };
-    setMessages(prev => [...prev, userMsg]);
-    setInput(""); setUploadedFile(null);
-    setIsLoading(true); isLoadingRef.current = true; setStreamingContent("");
 
-    // Track conversation count
-    try {
-      const count = parseInt(localStorage.getItem("jarvis_conversation_count") || "0", 10);
-      localStorage.setItem("jarvis_conversation_count", String(count + 1));
-    } catch {}
+    setMessages(prev => [...prev, userMsg]);
+    setInput("");
+    setUploadedFile(null);
+    setIsLoading(true);
+    isLoadingRef.current = true;
+    setStreamingContent("");
+
+    // Pre-scan for desktop actions — execute BEFORE AI call
+    const { actionExecuted, actionDescription, modifiedMessage } = await preScanAndExecuteAction(text.trim());
+    if (actionExecuted) {
+      const actionMsg: JarvisMessage = {
+        id: `msg_action_${Date.now()}`,
+        role: "assistant",
+        content: `✅ ${actionDescription}`,
+        emotion: "happy" as EmotionType,
+        timestamp: Date.now(),
+      };
+      setMessages(prev => [...prev, actionMsg]);
+    }
+    const messageForAI = modifiedMessage;
 
     try {
       const isTask = /^(do|task|run|execute|search|find|analyze|write|create|build|scrape|fetch|download)/i.test(text.trim());
       const taskId = isTask ? `task_${Date.now()}` : null;
-      if (taskId) setBgTasks(prev => [...prev, { id: taskId, description: text.trim(), status: "running" }]);
+
+      if (taskId) {
+        setBgTasks(prev => [...prev, { id: taskId, description: text.trim(), status: "running" }]);
+      }
 
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: text.trim(), userId, history: messagesRef.current.slice(-20),
-          stream: true, apiKeys: currentKeys, activeProvider,
+          message: messageForAI,
+          userId,
+          history: messagesRef.current.slice(-20),
+          stream: true,
+          apiKeys: currentKeys,
+          activeProvider,
           file: fileData ? { name: fileData.name, type: fileData.type, dataUrl: fileData.dataUrl } : null,
         }),
       });
+
       if (!response.ok) throw new Error("API error");
+
       const reader = response.body?.getReader();
       if (!reader) throw new Error("No reader");
+
       const decoder = new TextDecoder();
       let fullContent = "";
       let emotion: EmotionType = "normal";
@@ -804,29 +1181,44 @@ function ChatSection({
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+
         const chunk = decoder.decode(value);
         const lines = chunk.split("\n");
+
         for (const line of lines) {
           if (line.startsWith("data: ")) {
             try {
               const data = JSON.parse(line.slice(6));
-              if (data.type === "meta") { emotion = data.emotion || "normal"; setCurrentEmotion(emotion); }
-              else if (data.type === "content") { fullContent += data.content; setStreamingContent(fullContent); }
-              else if (data.type === "done") {
+              if (data.type === "meta") {
+                emotion = data.emotion || "normal";
+                setCurrentEmotion(emotion);
+              } else if (data.type === "content") {
+                fullContent += data.content;
+                setStreamingContent(fullContent);
+              } else if (data.type === "done") {
                 const assistantMsg: JarvisMessage = {
-                  id: `msg_${Date.now()}`, role: "assistant", content: fullContent, emotion, timestamp: Date.now(),
+                  id: `msg_${Date.now()}`,
+                  role: "assistant",
+                  content: fullContent,
+                  emotion,
+                  timestamp: Date.now(),
                 };
                 setMessages(prev => [...prev, assistantMsg]);
                 setStreamingContent("");
+
                 if (taskId) {
                   setBgTasks(prev => prev.map(t =>
                     t.id === taskId ? { ...t, status: "completed" as const, result: fullContent.substring(0, 100) } : t
                   ));
                 }
+
+                // Speak the response
                 speakText(fullContent, emotion, () => {
                   if (conversationModeRef.current) {
                     setTimeout(() => {
-                      if (conversationModeRef.current && !isSpeakingRef.current) startListening(true);
+                      if (conversationModeRef.current && !isSpeakingRef.current) {
+                        startListeningRef.current(true);
+                      }
                     }, 400);
                   }
                 });
@@ -835,7 +1227,7 @@ function ChatSection({
           }
         }
       }
-    } catch {
+    } catch (error) {
       const errorMsg: JarvisMessage = {
         id: `msg_${Date.now()}`, role: "assistant",
         content: "معذرت، کنکشن میں مسئلہ ہے۔ دوبارہ کوشش کریں۔",
@@ -843,41 +1235,64 @@ function ChatSection({
       };
       setMessages(prev => [...prev, errorMsg]);
       if (conversationModeRef.current) {
-        setTimeout(() => { if (conversationModeRef.current) startListening(true); }, 1000);
+        setTimeout(() => { if (conversationModeRef.current) startListeningRef.current(true); }, 1000);
       }
     } finally {
       setIsLoading(false);
       isLoadingRef.current = false;
     }
-  }, [userId, apiKeys, activeProvider, speakText, startListening, cancelAllSpeech]);
+  }, [userId, apiKeys, activeProvider, speakText, cancelAllSpeech, preScanAndExecuteAction]);
 
   const sendMessage = useCallback((text: string) => sendMessageDirect(text, uploadedFile || undefined), [sendMessageDirect, uploadedFile]);
 
+  // Ref syncs for circular dependencies
+  useEffect(() => { startListeningRef.current = startListening; }, [startListening]);
+  useEffect(() => { sendMessageDirectRef.current = sendMessageDirect; }, [sendMessageDirect]);
+
+  // ===== CONVERSATION MODE TOGGLE =====
   const toggleConversationMode = useCallback(() => {
     const newMode = !conversationMode;
     setConversationMode(newMode);
     conversationModeRef.current = newMode;
-    if (newMode) { cancelAllSpeech(); setTimeout(() => startListening(true), 300); }
-    else {
-      cancelAllSpeech();
-      recognitionRef.current?.stop();
-      setIsRecording(false); setIsListening(false);
-    }
-  }, [conversationMode, startListening, cancelAllSpeech]);
 
+    if (newMode) {
+      cancelAllSpeech();
+      setTimeout(() => startListening(true), 300);
+    } else {
+      cancelAllSpeech();
+      stopAllListening();
+    }
+  }, [conversationMode, startListening, cancelAllSpeech, stopAllListening]);
+
+  // ===== MANUAL VOICE TOGGLE =====
   const toggleRecording = useCallback(() => {
     if (conversationMode) return;
-    if (isRecording) { recognitionRef.current?.stop(); setIsRecording(false); setIsListening(false); }
-    else { startListening(true); }
-  }, [isRecording, conversationMode, startListening]);
+    if (isRecording) {
+      // Stop whichever STT path is active
+      if (sttMediaRecorderRef.current && sttMediaRecorderRef.current.state === "recording") {
+        stopCloudListeningAndTranscribe();
+      } else {
+        recognitionRef.current?.stop();
+      }
+      setIsRecording(false);
+      setIsListening(false);
+    } else {
+      startListening(true);
+    }
+  }, [isRecording, conversationMode, startListening, stopCloudListeningAndTranscribe]);
 
+  // ===== FILE UPLOAD =====
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (file.size > 5 * 1024 * 1024) { alert("File must be under 5MB"); return; }
+
     const reader = new FileReader();
     reader.onload = (ev) => {
-      setUploadedFile({ name: file.name, type: file.type, size: file.size, dataUrl: ev.target?.result as string });
+      setUploadedFile({
+        name: file.name, type: file.type, size: file.size,
+        dataUrl: ev.target?.result as string,
+      });
       inputRef.current?.focus();
     };
     reader.readAsDataURL(file);
@@ -885,36 +1300,34 @@ function ChatSection({
   }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(input); }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage(input);
+    }
   };
 
+  const quickActions = [
+    { icon: "🎙️", text: "Voice Chat", prompt: "", isConvMode: true },
+    { icon: "📖", text: "Record Story", prompt: "", isStoryMode: true },
+    { icon: "🎭", text: "Clone Voice", prompt: "", isVoiceClone: true },
+    { icon: "🎯", text: "Fiverr Gig", prompt: "Fiverr pe web development ka gig banao — complete SEO, title, description, 3 packages, image prompts, tags, aur FAQs ke saath" },
+    { icon: "🔍", text: "Hunt Jobs", prompt: "Mujhe jobs dhundho — web development, frontend, React, Next.js ke liye sab main platforms pe jobs talaash karo" },
+    { icon: "🚀", text: "Auto Freelance", prompt: "Poora freelancing pipeline khud chalao — market research, gig banao, jobs dhundho, apply karo, client se baat karo, report do" },
+    { icon: "💰", text: "Gig SEO", prompt: "Fiverr SEO analysis karo web development category ke liye — best keywords, tags, competitor analysis, optimization tips" },
+    { icon: "💬", text: "Client Chat", prompt: "Client se WhatsApp pe baat karni hai — help me chat naturally as Rayan Sir" },
+    { icon: "📝", text: "Proposal", prompt: "Winning proposal likho — job description de raha hoon" },
+    { icon: "🤖", text: "Automation", prompt: "Mere liye complete automation plan banao — khud jobs dhundho, gige banao, apply karo, client se baat karo, project complete karo" },
+  ];
+
   const emotionEmojis: Record<EmotionType, string> = {
-    happy: "😊", encouraging: "💪", serious: "⚡", sympathetic: "💙", surprised: "😲", normal: "🙂",
+    happy: "😊", encouraging: "💪", serious: "⚡",
+    sympathetic: "💙", surprised: "😲", normal: "🙂",
   };
 
   const providerLabels: Record<LLMProvider, string> = {
-    groq: "Groq", gemini: "Gemini", openai: "OpenAI", zai: "ZAI", xai: "xAI", anthropic: "Claude",
+    groq: "Groq", gemini: "Gemini", openai: "OpenAI", zai: "ZAI",
+    xai: "xAI / Grok", anthropic: "Claude",
   };
-
-  // Input wrapper glow class
-  const inputGlowClass = isRecording ? "glow-green" : isSpeaking ? "glow-purple" : "";
-
-  // Wave animation bars for JARVIS speaking
-  const waveBars = Array.from({ length: 20 }, (_, i) => (
-    <div
-      key={i}
-      className="wave-bar"
-      style={{
-        animationDelay: `${i * 0.06}s`,
-        animationDuration: `${0.8 + Math.random() * 0.6}s`,
-      }}
-    />
-  ));
-
-  // Recording ripple rings
-  const rippleRings = Array.from({ length: 3 }, (_, i) => (
-    <div key={i} className="ripple-ring" style={{ animationDelay: `${i * 0.5}s` }} />
-  ));
 
   return (
     <div className="chat-container">
@@ -923,7 +1336,7 @@ function ChatSection({
         <div className="header-brand">
           <div className="brand-icon">🧠</div>
           <div>
-            <div className="brand-title">JARVIS Chat</div>
+            <div className="brand-title">JARVIS</div>
             <div className="brand-status">
               <span className={`status-dot ${connectionStatus === "online" ? "status-online" : "status-offline"}`}></span>
               <span>
@@ -937,9 +1350,53 @@ function ChatSection({
         </div>
         <div className="header-actions">
           <button className="btn-icon" onClick={cancelAllSpeech} title="Mute">🔇</button>
+          <button className="btn-icon" onClick={() => setShowVoiceClone(!showVoiceClone)} title="Voice Clone" style={{color: clonedVoiceId ? "#22c55e" : undefined}}>🎭</button>
+          <button className="btn-icon" onClick={() => setShowStoryPanel(!showStoryPanel)} title="Story Recorder">📖</button>
           <button className="btn-icon" onClick={() => setShowSettings(true)} title="Settings">⚙️</button>
         </div>
       </header>
+
+      {/* TTS Provider Indicator + Test Button */}
+      {(ttsProvider || ttsTestResult) && (
+        <div style={{
+          padding: "4px 12px",
+          background: ttsProvider && (ttsProvider.includes("google") || ttsProvider.includes("Google") || ttsProvider.includes("Browser") || ttsProvider.includes("Chrome"))
+            ? "rgba(239,68,68,0.15)" : "rgba(34,197,94,0.15)",
+          borderBottom: ttsProvider && (ttsProvider.includes("google") || ttsProvider.includes("Google") || ttsProvider.includes("Browser") || ttsProvider.includes("Chrome"))
+            ? "1px solid rgba(239,68,68,0.3)" : "1px solid rgba(34,197,94,0.3)",
+          fontSize: "11px",
+          color: ttsProvider && (ttsProvider.includes("google") || ttsProvider.includes("Google") || ttsProvider.includes("Browser") || ttsProvider.includes("Chrome"))
+            ? "#ef4444" : "#22c55e",
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+          flexWrap: "wrap",
+        }}>
+          {ttsProvider && (
+            <>
+              <span>{ttsProvider.includes("google") || ttsProvider.includes("Google") || ttsProvider.includes("Browser") || ttsProvider.includes("Chrome") ? "⚠️" : "✅"}</span>
+              <span>آواز: {ttsProvider}</span>
+              {(ttsProvider.includes("google") || ttsProvider.includes("Google") || ttsProvider.includes("Browser") || ttsProvider.includes("Chrome")) && (
+                <button onClick={testTTS} disabled={ttsTesting} style={{
+                  background: "rgba(239,68,68,0.2)", border: "1px solid rgba(239,68,68,0.4)",
+                  borderRadius: "4px", color: "#ef4444", cursor: "pointer",
+                  padding: "2px 8px", fontSize: "10px", fontWeight: 600,
+                }}>
+                  {ttsTesting ? "⏳ ٹیسٹ..." : "🔧 ٹیسٹ آواز"}
+                </button>
+              )}
+            </>
+          )}
+          {ttsTestResult && (
+            <pre style={{
+              fontSize: "10px", margin: "4px 0 0", padding: "6px 8px",
+              background: "rgba(0,0,0,0.3)", borderRadius: "4px",
+              whiteSpace: "pre-wrap", width: "100%", maxHeight: "200px",
+              overflow: "auto", color: ttsTestResult.startsWith("✅") ? "#22c55e" : "#ef4444",
+            }}>{ttsTestResult}</pre>
+          )}
+        </div>
+      )}
 
       {/* Conversation Banner */}
       {conversationMode && (
@@ -957,6 +1414,226 @@ function ChatSection({
             <div className="conv-info-sub">
               {isSpeaking ? "جواب سنیے، پھر آپ کی باری" : isListening ? "اب بولیے — آٹو سینڈ" : "بولیے، سنے گا اور انسان کی طرح جواب دے گا"}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Voice Cloning Panel */}
+      {showVoiceClone && (
+        <div style={{
+          padding: "16px",
+          background: "rgba(236,72,153,0.1)",
+          borderBottom: "1px solid rgba(236,72,153,0.3)",
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+            <h3 style={{ fontSize: "14px", fontWeight: 600, color: "#ec4899" }}>🎭 وائس کلونر — اپنی آواز مستقل بنائیں</h3>
+            <button onClick={() => setShowVoiceClone(false)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: "16px" }}>✕</button>
+          </div>
+          
+          {clonedVoiceId && (
+            <div style={{ padding: "8px 12px", background: "rgba(34,197,94,0.15)", borderRadius: "8px", marginBottom: "12px", fontSize: "12px", color: "#22c55e" }}>
+              ✅ کلون شدہ آواز فعال ہے — JARVIS اب آپ کی آواز میں بولے گا!
+              <br />Voice ID: {clonedVoiceId.substring(0, 16)}...
+            </div>
+          )}
+
+          <div style={{ fontSize: "12px", color: "var(--text-muted)", marginBottom: "12px" }}>
+            اپنی آواز ریکارڈ کریں — JARVIS ہمیشہ آپ کی آواز میں بولے گا۔ API Keys کی ضرورت نہیں پڑے گی مستقبل میں!
+          </div>
+
+          {/* Recording controls */}
+          <div style={{ display: "flex", gap: "8px", marginBottom: "12px", flexWrap: "wrap" }}>
+            <button
+              onClick={voiceCloneRecording ? stopVoiceCloneRecording : startVoiceCloneRecording}
+              style={{
+                padding: "8px 16px",
+                background: voiceCloneRecording ? "rgba(239,68,68,0.2)" : "rgba(236,72,153,0.2)",
+                border: voiceCloneRecording ? "1px solid rgba(239,68,68,0.4)" : "1px solid rgba(236,72,153,0.4)",
+                borderRadius: "8px",
+                color: voiceCloneRecording ? "#ef4444" : "#ec4899",
+                cursor: "pointer",
+                fontSize: "12px",
+                fontWeight: 600,
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+              }}
+            >
+              {voiceCloneRecording ? "⏹️ رکیں" : "🎙️ آواز ریکارڈ کریں"}
+            </button>
+
+            <span style={{ fontSize: "11px", color: "var(--text-muted)", alignSelf: "center" }}>
+              نمونے: {voiceCloneSamples.length}/5 (کم از کم 3 چاہیے)
+            </span>
+
+            {voiceCloneSamples.length >= 1 && (
+              <button
+                onClick={() => setVoiceCloneSamples([])}
+                style={{
+                  padding: "6px 12px",
+                  background: "rgba(239,68,68,0.1)",
+                  border: "1px solid rgba(239,68,68,0.3)",
+                  borderRadius: "6px",
+                  color: "#ef4444",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                }}
+              >
+                🗑️ صاف کریں
+              </button>
+            )}
+          </div>
+
+          {/* Recording tips */}
+          {voiceCloneRecording && (
+            <div style={{ padding: "8px 12px", background: "rgba(239,68,68,0.1)", borderRadius: "8px", marginBottom: "12px", fontSize: "11px", color: "#ef4444" }}>
+              🔴 ریکارڈنگ جاری ہے... قدرتی انداز میں بولیے۔ کچھ بھی پڑھیں — اخبار، کہانی، یا اپنی باتیں۔ 30 سیکنڈ سے زیادہ ریکارڈ کریں۔
+            </div>
+          )}
+
+          {/* Clone button */}
+          {voiceCloneSamples.length >= 1 && (
+            <button
+              onClick={cloneMyVoice}
+              disabled={voiceCloneSamples.length < 1}
+              style={{
+                padding: "10px 20px",
+                background: "linear-gradient(135deg, #ec4899, #8b5cf6)",
+                border: "none",
+                borderRadius: "8px",
+                color: "white",
+                cursor: voiceCloneSamples.length >= 1 ? "pointer" : "not-allowed",
+                fontSize: "13px",
+                fontWeight: 600,
+                width: "100%",
+                opacity: voiceCloneSamples.length >= 1 ? 1 : 0.5,
+              }}
+            >
+              🎭 آواز کلون کریں ({voiceCloneSamples.length} نمونے)
+            </button>
+          )}
+
+          {voiceCloneStatus && (
+            <div style={{ marginTop: "8px", fontSize: "12px", color: voiceCloneStatus.startsWith("✅") ? "#22c55e" : "#ef4444" }}>
+              {voiceCloneStatus}
+            </div>
+          )}
+
+          {/* Fetch existing voices */}
+          <div style={{ marginTop: "12px", borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: "12px" }}>
+            <button
+              onClick={fetchMyVoices}
+              style={{
+                padding: "6px 12px",
+                background: "rgba(139,92,246,0.2)",
+                border: "1px solid rgba(139,92,246,0.4)",
+                borderRadius: "6px",
+                color: "#8b5cf6",
+                cursor: "pointer",
+                fontSize: "11px",
+              }}
+            >
+              📋 میری آوازیں دیکھیں
+            </button>
+
+            {discoveredVoices.length > 0 && (
+              <div style={{ marginTop: "8px", maxHeight: "150px", overflow: "auto" }}>
+                {discoveredVoices.map((v) => (
+                  <button
+                    key={v.id}
+                    onClick={() => selectClonedVoice(v.id)}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      padding: "6px 10px",
+                      margin: "4px 0",
+                      background: clonedVoiceId === v.id ? "rgba(34,197,94,0.2)" : "rgba(255,255,255,0.05)",
+                      border: clonedVoiceId === v.id ? "1px solid rgba(34,197,94,0.4)" : "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: "6px",
+                      color: clonedVoiceId === v.id ? "#22c55e" : "var(--text-primary)",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      textAlign: "left",
+                    }}
+                  >
+                    {v.category === "cloned" ? "🎭" : v.gender === "female" ? "👩" : "👨"} {v.name}
+                    <span style={{ color: "var(--text-muted)", marginLeft: "8px" }}>
+                      ({v.category}, {v.gender})
+                    </span>
+                    {clonedVoiceId === v.id && " ✅"}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Story Recording Panel */}
+      {showStoryPanel && (
+        <div style={{
+          padding: "16px",
+          background: "rgba(139,92,246,0.1)",
+          borderBottom: "1px solid rgba(139,92,246,0.3)",
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+            <h3 style={{ fontSize: "14px", fontWeight: 600, color: "#8b5cf6" }}>📖 کہانی ریکارڈر</h3>
+            <button onClick={() => setShowStoryPanel(false)} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: "16px" }}>✕</button>
+          </div>
+          <p style={{ color: "var(--text-muted)", fontSize: "12px", marginBottom: "10px" }}>
+            کہانی لکھیں یا پیسٹ کریں — نیچرل آواز میں ریکارڈ ہوگی اور ڈاؤنلوڈ ہو جائے گی!
+          </p>
+          <input
+            type="text"
+            placeholder="کہانی کا عنوان..."
+            value={storyTitle}
+            onChange={(e) => setStoryTitle(e.target.value)}
+            style={{
+              width: "100%", padding: "8px 12px", marginBottom: "8px",
+              background: "var(--bg-primary)", border: "1px solid var(--border-color)",
+              borderRadius: "var(--radius-sm)", color: "var(--text-primary)", fontSize: "13px",
+            }}
+          />
+          <textarea
+            placeholder="یہاں کہانی لکھیں یا پیسٹ کریں..."
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            style={{
+              width: "100%", padding: "10px 12px", minHeight: "120px",
+              background: "var(--bg-primary)", border: "1px solid var(--border-color)",
+              borderRadius: "var(--radius-sm)", color: "var(--text-primary)", fontSize: "13px",
+              resize: "vertical",
+            }}
+          />
+          <div style={{ display: "flex", gap: "8px", marginTop: "10px" }}>
+            <button
+              onClick={() => recordStory(input, storyTitle)}
+              disabled={!input.trim() || isRecordingStory}
+              style={{
+                background: isRecordingStory ? "rgba(139,92,246,0.3)" : "rgba(139,92,246,0.15)",
+                border: "1px solid rgba(139,92,246,0.4)",
+                borderRadius: "8px", color: "#8b5cf6", cursor: isRecordingStory ? "wait" : "pointer",
+                padding: "8px 16px", fontSize: "13px", fontWeight: 600,
+                display: "flex", alignItems: "center", gap: "6px",
+              }}
+            >
+              {isRecordingStory ? "⏳ ریکارڈ ہو رہی ہے..." : "🎙️ ریکارڈ کریں اور ڈاؤنلوڈ"}
+            </button>
+            <button
+              onClick={() => {
+                if (input.trim()) {
+                  speakText(input, "normal");
+                }
+              }}
+              disabled={!input.trim() || isRecordingStory}
+              style={{
+                background: "rgba(59,130,246,0.15)", border: "1px solid rgba(59,130,246,0.3)",
+                borderRadius: "8px", color: "var(--accent-primary)", cursor: "pointer",
+                padding: "8px 16px", fontSize: "13px", fontWeight: 600,
+              }}
+            >
+              🔊 صرف سنیں
+            </button>
           </div>
         </div>
       )}
@@ -981,18 +1658,35 @@ function ChatSection({
             <p className="welcome-subtitle">
               ریان سر کا ذاتی ساتھی — جobs تلاش، کلائنٹس سے بات، فری لانسنگ سب کچھ!
             </p>
+
             {!hasAnyKey ? (
               <div className="welcome-alert welcome-alert-warning">
                 <p style={{ fontWeight: 600 }}>⚠️ API Key ضروری ہے!</p>
                 <p style={{ fontSize: "13px", opacity: 0.85 }}>Settings میں جا کر کم از کم ایک API Key ڈالیں</p>
-                <button className="welcome-alert-btn" onClick={() => setShowSettings(true)}>⚙️ Settings کھولیں</button>
+                <button className="welcome-alert-btn" onClick={() => setShowSettings(true)}>
+                  ⚙️ Settings کھولیں
+                </button>
               </div>
             ) : (
               <div className="welcome-alert welcome-alert-success">
                 <p style={{ fontWeight: 600 }}>🎙️ نیچرل وائس چیٹ تیار ہے!</p>
-                <p style={{ fontSize: "13px", opacity: 0.85 }}>نیچے 🎧 دباؤ — بولو، جاروس سنے گا، انسان کی طرح جواب دے گا!</p>
+                <p style={{ fontSize: "13px", opacity: 0.85 }}>
+                  نیچے 🎧 دباؤ — بولو، جاروس سنے گا، انسان کی طرح جواب دے گا!
+                </p>
               </div>
             )}
+
+            <div className="quick-actions">
+              {quickActions.map((action, i) => (
+                <button key={i} className="quick-action"
+                  onClick={() => action.isConvMode ? toggleConversationMode() : action.isStoryMode ? setShowStoryPanel(true) : (action as any).isVoiceClone ? setShowVoiceClone(true) : sendMessage(action.prompt)}
+                  disabled={!hasAnyKey && !action.isConvMode && !action.isStoryMode && !(action as any).isVoiceClone}
+                >
+                  <div className="quick-action-icon">{action.icon}</div>
+                  <div className="quick-action-text">{action.text}</div>
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
           <>
@@ -1028,13 +1722,6 @@ function ChatSection({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Wave Animation when JARVIS is speaking */}
-      {isSpeaking && (
-        <div className="wave-container">
-          {waveBars}
-        </div>
-      )}
-
       {/* Input Area */}
       <div className="chat-input-area">
         {uploadedFile && (
@@ -1045,34 +1732,31 @@ function ChatSection({
           </div>
         )}
 
-        <div className={`chat-input-wrapper ${inputGlowClass}`}>
-          <button className="btn-icon" onClick={() => fileInputRef.current?.click()} title="Upload file">📎</button>
+        <div className="chat-input-wrapper">
+          <button className="btn-icon" onClick={() => fileInputRef.current?.click()} title="Upload file">
+            📎
+          </button>
           <input ref={fileInputRef} type="file" hidden
             accept="image/*,.pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css"
             onChange={handleFileUpload} />
 
-          {/* Conversation Mode Button */}
           <button
             className={`btn-icon ${conversationMode ? "btn-conversation-active" : ""}`}
             onClick={toggleConversationMode}
-            title={conversationMode ? "🎙️ Stop Voice Chat" : "🎧 Start Voice Chat"}
+            title={conversationMode ? "🎙️ Stop Voice Chat" : "🎧 Start Voice Chat (Conversation Mode)"}
             disabled={!hasAnyKey}
           >
             {conversationMode ? "🎙️" : "🎧"}
           </button>
 
-          {/* Mic button with ripple effect */}
-          <div className="ripple-container" style={{ position: "relative" }}>
-            {isRecording && rippleRings}
-            <button
-              className={`btn-icon btn-voice ${isRecording ? "recording" : ""}`}
-              onClick={toggleRecording}
-              title={isRecording ? "Stop" : "🎤 Voice input (auto-sends)"}
-              disabled={conversationMode}
-            >
-              {isRecording ? "⏹️" : "🎤"}
-            </button>
-          </div>
+          <button
+            className={`btn-icon btn-voice ${isRecording ? "recording" : ""}`}
+            onClick={toggleRecording}
+            title={isRecording ? "Stop" : "🎤 Voice input (auto-sends)"}
+            disabled={conversationMode}
+          >
+            {isRecording ? "⏹️" : "🎤"}
+          </button>
 
           <textarea ref={inputRef} className="chat-input" value={input}
             onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
@@ -1087,16 +1771,15 @@ function ChatSection({
           <span>
             {hasAnyKey ? providerLabels[activeProvider] : "⚠️ No Key"}
             {conversationMode ? " · 🎙️ Voice Chat ON" : " · 🎧 = voice chat"}
-            {isRecording && " · 🟢 Recording..."}
-            {isSpeaking && " · 🟣 Speaking..."}
+            {" · 🎯 Hunt Jobs · 💬 Client Chat"}
           </span>
           <span>Enter to send</span>
         </div>
       </div>
 
-      {/* Quick Settings Popup */}
+      {/* Settings */}
       {showSettings && (
-        <ChatSettingsPanel
+        <SettingsPanel
           apiKeys={apiKeys}
           activeProvider={activeProvider}
           onSaveKeys={saveApiKeys}
@@ -1108,8 +1791,8 @@ function ChatSection({
   );
 }
 
-// ============== CHAT SETTINGS PANEL ==============
-function ChatSettingsPanel({
+// ============== SETTINGS PANEL — MULTI-KEY WITH ADD MORE ==============
+function SettingsPanel({
   apiKeys, activeProvider, onSaveKeys, onSaveProvider, onClose,
 }: {
   apiKeys: APIKeys;
@@ -1118,722 +1801,317 @@ function ChatSettingsPanel({
   onSaveProvider: (provider: LLMProvider) => void;
   onClose: () => void;
 }) {
-  const [localKeys, setLocalKeys] = useState<APIKeys>({ ...apiKeys });
-  const [localProvider, setLocalProvider] = useState<LLMProvider>(activeProvider);
-  const [elevenlabsKey, setElevenlabsKey] = useState(() => {
-    if (typeof window === "undefined") return "";
-    return localStorage.getItem("jarvis_elevenlabs_key") || "";
-  });
-  const [sarvamKey, setSarvamKey] = useState(() => {
-    if (typeof window === "undefined") return "";
-    return localStorage.getItem("jarvis_sarvam_key") || "";
-  });
+  const parseKeysArray = (str: string): string[] => {
+    if (!str || !str.trim()) return [""];
+    const keys = str.split(",").map(k => k.trim()).filter(k => k.length > 0);
+    return keys.length > 0 ? keys : [""];
+  };
 
-  const providers: Array<{ id: LLMProvider; name: string; keyPlaceholder: string; getKeyUrl: string }> = [
-    { id: "groq", name: "Groq (Llama 3.3 70B)", keyPlaceholder: "gsk_...", getKeyUrl: "https://console.groq.com" },
-    { id: "gemini", name: "Google Gemini 1.5 Flash", keyPlaceholder: "AIza...", getKeyUrl: "https://aistudio.google.com/apikey" },
-    { id: "openai", name: "OpenAI (GPT-4o Mini)", keyPlaceholder: "sk-...", getKeyUrl: "https://platform.openai.com/api-keys" },
-    { id: "zai", name: "ZAI (GLM-4 Flash)", keyPlaceholder: "your-zai-api-key", getKeyUrl: "https://open.bigmodel.cn" },
-    { id: "xai", name: "xAI / Grok", keyPlaceholder: "xai-...", getKeyUrl: "https://console.x.ai" },
-    { id: "anthropic", name: "Anthropic / Claude", keyPlaceholder: "sk-ant-...", getKeyUrl: "https://console.anthropic.com" },
+  const loadKeysArray = (storageKey: string, fallbackKey?: string): string[] => {
+    if (typeof window === "undefined") return [""];
+    const stored = localStorage.getItem(storageKey) || "";
+    if (stored) return parseKeysArray(stored);
+    if (fallbackKey) {
+      const fallback = localStorage.getItem("jarvis_api_keys");
+      if (fallback) {
+        try {
+          const parsed = JSON.parse(fallback);
+          if (parsed[fallbackKey]) return parseKeysArray(parsed[fallbackKey]);
+        } catch {}
+      }
+    }
+    return [""];
+  };
+
+  const [groqKeys, setGroqKeys] = useState<string[]>(() => parseKeysArray(apiKeys.groq || ""));
+  const [geminiKeys, setGeminiKeys] = useState<string[]>(() => parseKeysArray(apiKeys.gemini || ""));
+  const [openaiKeys, setOpenaiKeys] = useState<string[]>(() => parseKeysArray(apiKeys.openai || ""));
+  const [zaiKeys, setZaiKeys] = useState<string[]>(() => parseKeysArray(apiKeys.zai || ""));
+  const [localProvider, setLocalProvider] = useState<LLMProvider>(activeProvider);
+
+  // TTS keys
+  const [elevenlabsKeys, setElevenlabsKeys] = useState<string[]>(() => loadKeysArray("jarvis_elevenlabs_key"));
+  const [sarvamKeys, setSarvamKeys] = useState<string[]>(() => loadKeysArray("jarvis_sarvam_key"));
+
+  const providers: Array<{ id: LLMProvider; name: string; keyPlaceholder: string; getKeyUrl: string; free: boolean; icon: string }> = [
+    { id: "groq", name: "Groq (Llama 3.3 70B)", keyPlaceholder: "gsk_...", getKeyUrl: "https://console.groq.com", free: true, icon: "🆓" },
+    { id: "gemini", name: "Google Gemini 1.5 Flash", keyPlaceholder: "AIza...", getKeyUrl: "https://aistudio.google.com/apikey", free: true, icon: "🆓" },
+    { id: "openai", name: "OpenAI (GPT-4o Mini)", keyPlaceholder: "sk-...", getKeyUrl: "https://platform.openai.com/api-keys", free: false, icon: "💰" },
+    { id: "zai", name: "ZAI (GLM-4 Flash)", keyPlaceholder: "your-zai-api-key", getKeyUrl: "https://open.bigmodel.cn", free: true, icon: "🆓" },
   ];
 
+  const getKeysForProvider = (id: LLMProvider): string[] => {
+    switch (id) {
+      case "groq": return groqKeys;
+      case "gemini": return geminiKeys;
+      case "openai": return openaiKeys;
+      case "zai": return zaiKeys;
+      default: return [""];
+    }
+  };
+
+  const setKeysForProvider = (id: LLMProvider, keys: string[]) => {
+    switch (id) {
+      case "groq": setGroqKeys(keys); break;
+      case "gemini": setGeminiKeys(keys); break;
+      case "openai": setOpenaiKeys(keys); break;
+      case "zai": setZaiKeys(keys); break;
+    }
+  };
+
+  const addKey = (id: LLMProvider | "elevenlabs" | "sarvam") => {
+    if (id === "elevenlabs") { setElevenlabsKeys(prev => [...prev, ""]); return; }
+    if (id === "sarvam") { setSarvamKeys(prev => [...prev, ""]); return; }
+    setKeysForProvider(id, [...getKeysForProvider(id), ""]);
+  };
+
+  const removeKey = (id: LLMProvider | "elevenlabs" | "sarvam", index: number) => {
+    if (id === "elevenlabs") {
+      setElevenlabsKeys(prev => prev.length <= 1 ? [""] : prev.filter((_, i) => i !== index));
+      return;
+    }
+    if (id === "sarvam") {
+      setSarvamKeys(prev => prev.length <= 1 ? [""] : prev.filter((_, i) => i !== index));
+      return;
+    }
+    const current = getKeysForProvider(id);
+    setKeysForProvider(id, current.length <= 1 ? [""] : current.filter((_, i) => i !== index));
+  };
+
+  const updateKey = (id: LLMProvider | "elevenlabs" | "sarvam", index: number, value: string) => {
+    if (id === "elevenlabs") {
+      setElevenlabsKeys(prev => { const n = [...prev]; n[index] = value; return n; });
+      return;
+    }
+    if (id === "sarvam") {
+      setSarvamKeys(prev => { const n = [...prev]; n[index] = value; return n; });
+      return;
+    }
+    const current = getKeysForProvider(id);
+    const updated = [...current];
+    updated[index] = value;
+    setKeysForProvider(id, updated);
+  };
+
+  const joinKeys = (keys: string[]): string => {
+    return keys.filter(k => k.trim().length > 0).join(",");
+  };
+
+  const countKeys = (keys: string[]): number => keys.filter(k => k.trim().length > 0).length;
+
   const handleSave = () => {
-    onSaveKeys(localKeys);
+    const newKeys: APIKeys = {
+      groq: joinKeys(groqKeys),
+      gemini: joinKeys(geminiKeys),
+      openai: joinKeys(openaiKeys),
+      zai: joinKeys(zaiKeys),
+    };
+    onSaveKeys(newKeys);
     onSaveProvider(localProvider);
-    localStorage.setItem("jarvis_elevenlabs_key", elevenlabsKey);
-    localStorage.setItem("jarvis_sarvam_key", sarvamKey);
+    localStorage.setItem("jarvis_elevenlabs_key", joinKeys(elevenlabsKeys));
+    localStorage.setItem("jarvis_sarvam_key", joinKeys(sarvamKeys));
     onClose();
   };
+
+  const KeyInputRow = ({ value, onChange, onRemove, placeholder, canRemove }: {
+    value: string; onChange: (v: string) => void; onRemove: () => void;
+    placeholder: string; canRemove: boolean;
+  }) => (
+    <div style={{ display: "flex", gap: "6px", marginBottom: "6px" }}>
+      <input type="password" className="provider-input" style={{ marginBottom: 0, flex: 1 }}
+        value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
+      {canRemove && (
+        <button onClick={onRemove} style={{
+          background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.3)",
+          borderRadius: "6px", color: "#ef4444", cursor: "pointer", padding: "0 10px",
+          fontSize: "16px", fontWeight: 600, lineHeight: "1",
+        }} title="Remove key">✕</button>
+      )}
+    </div>
+  );
 
   return (
     <div className="settings-overlay" onClick={onClose}>
       <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
         <h2>⚙️ API Settings</h2>
         <p style={{ color: "var(--text-muted)", fontSize: "13px", marginBottom: "20px" }}>
-          کم از کم ایک API Key ڈالیں۔ comma (,) سے الگ کریں — لیمٹ ختم ہو تو اگلی key خودکار چلے گی!
+          کم از کم ایک API Key ڈالیں۔ + Add More سے زیادہ keys ڈالیں — لیمٹ ختم ہو تو اگلی key خودکار چلے گی!
         </p>
+
         <label style={{ fontWeight: 600, marginBottom: "8px", display: "block" }}>🎯 Active Provider</label>
         <select
           value={localProvider}
           onChange={(e) => setLocalProvider(e.target.value as LLMProvider)}
-          className="form-select"
-          style={{ marginBottom: 16 }}
+          style={{
+            width: "100%", padding: "10px 12px", background: "var(--bg-primary)",
+            border: "1px solid var(--border-color)", borderRadius: "var(--radius-sm)",
+            color: "var(--text-primary)", fontSize: "14px", marginBottom: "20px", outline: "none",
+          }}
         >
-          {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          {providers.map((p) => {
+            const keys = getKeysForProvider(p.id);
+            const hasKey = countKeys(keys) > 0;
+            return (
+              <option key={p.id} value={p.id} disabled={!hasKey}>
+                {p.name} {!hasKey ? "(No Key)" : `✅ ${countKeys(keys)} key(s)`} {p.free ? "🆓" : "💰"}
+              </option>
+            );
+          })}
         </select>
 
-        {providers.map((p) => (
-          <div key={p.id} className="provider-card">
-            <div className="provider-header">
-              <span className="provider-name">{p.name}</span>
-              {localKeys[p.id] && localKeys[p.id]!.trim() && <span className="provider-saved">✓ Saved</span>}
+        {/* LLM Provider Keys */}
+        {providers.map((provider) => {
+          const keys = getKeysForProvider(provider.id);
+          const validCount = countKeys(keys);
+          return (
+            <div key={provider.id} className="provider-card"
+              style={{ borderColor: validCount > 0 ? "rgba(34,197,94,0.3)" : undefined }}>
+              <div className="provider-header">
+                <span className="provider-name">
+                  {provider.icon} {provider.name}
+                </span>
+                {validCount > 0 && <span className="provider-saved">✅ {validCount} key(s)</span>}
+              </div>
+              {keys.map((key, idx) => (
+                <KeyInputRow key={idx}
+                  value={key}
+                  onChange={(v) => updateKey(provider.id, idx, v)}
+                  onRemove={() => removeKey(provider.id, idx)}
+                  placeholder={provider.keyPlaceholder}
+                  canRemove={keys.length > 1}
+                />
+              ))}
+              <div style={{ display: "flex", gap: "8px", marginTop: "6px" }}>
+                <button onClick={() => addKey(provider.id)} style={{
+                  background: "rgba(59,130,246,0.15)", border: "1px solid rgba(59,130,246,0.3)",
+                  borderRadius: "6px", color: "var(--accent-primary)", cursor: "pointer",
+                  padding: "6px 12px", fontSize: "12px", fontWeight: 600,
+                }}>+ Add More</button>
+                <a href={provider.getKeyUrl} target="_blank" rel="noopener noreferrer" className="provider-link">
+                  Get API Key →
+                </a>
+              </div>
             </div>
-            <input
-              className="provider-input"
-              type="password"
-              placeholder={p.keyPlaceholder}
-              value={localKeys[p.id] || ""}
-              onChange={(e) => setLocalKeys({ ...localKeys, [p.id]: e.target.value })}
-            />
-            <a className="provider-link" href={p.getKeyUrl} target="_blank" rel="noopener noreferrer">
-              Get {p.name} API Key →
-            </a>
-          </div>
-        ))}
+          );
+        })}
 
-        <div className="provider-card" style={{ marginTop: 8 }}>
-          <div className="provider-header">
-            <span className="provider-name">🔊 ElevenLabs TTS</span>
-            {elevenlabsKey.trim() && <span className="provider-saved">✓</span>}
-          </div>
-          <input className="provider-input" type="password" placeholder="ElevenLabs API Key"
-            value={elevenlabsKey} onChange={(e) => setElevenlabsKey(e.target.value)} />
-        </div>
+        {/* ===== NATURAL VOICE / TTS Section ===== */}
+        <div style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color)" }}>
+          <h3 style={{ fontSize: "15px", fontWeight: 600, marginBottom: "12px" }}>🎙️ نیچرل آواز (100% انسان جیسی)</h3>
+          <p style={{ color: "var(--text-muted)", fontSize: "12px", marginBottom: "16px" }}>
+            یوٹیوب پر ہندی AI ایجنٹس جیسی بالکل نیچرل آواز چاہیے تو ElevenLabs یا Sarvam AI key ڈالیں۔ بغیر key کے Google TTS استعمال ہوگا (روبوٹک)۔
+          </p>
 
-        <div className="provider-card">
-          <div className="provider-header">
-            <span className="provider-name">🔊 Sarvam AI TTS</span>
-            {sarvamKey.trim() && <span className="provider-saved">✓</span>}
+          {/* ElevenLabs — THE BEST */}
+          <div className="provider-card" style={{ borderColor: countKeys(elevenlabsKeys) > 0 ? "rgba(34,197,94,0.3)" : undefined }}>
+            <div className="provider-header">
+              <span className="provider-name">👑 ElevenLabs Turbo (سب سے نیچرل!)</span>
+              {countKeys(elevenlabsKeys) > 0 && <span className="provider-saved">✅ {countKeys(elevenlabsKeys)} key(s)</span>}
+            </div>
+            <p style={{ color: "var(--text-muted)", fontSize: "11px", margin: "6px 0 8px" }}>
+              یہ وہی سسٹم ہے جو یوٹیوب پر ہندی AI ایجنٹس استعمال کرتے ہیں — 100% نیچرل، انسان جیسی آواز، جذبات کے ساتھ! اردو کے لیے خودکار ہندی/اردو آوازیں ٹرائی کرتا ہے۔
+            </p>
+            {elevenlabsKeys.map((key, idx) => (
+              <KeyInputRow key={idx}
+                value={key}
+                onChange={(v) => updateKey("elevenlabs", idx, v)}
+                onRemove={() => removeKey("elevenlabs", idx)}
+                placeholder="xi_..."
+                canRemove={elevenlabsKeys.length > 1}
+              />
+            ))}
+            <div style={{ display: "flex", gap: "8px", marginTop: "6px" }}>
+              <button onClick={() => addKey("elevenlabs")} style={{
+                background: "rgba(59,130,246,0.15)", border: "1px solid rgba(59,130,246,0.3)",
+                borderRadius: "6px", color: "var(--accent-primary)", cursor: "pointer",
+                padding: "6px 12px", fontSize: "12px", fontWeight: 600,
+              }}>+ Add More</button>
+              <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noopener noreferrer" className="provider-link">
+                🆓 Free API Key لیں →
+              </a>
+            </div>
           </div>
-          <input className="provider-input" type="password" placeholder="Sarvam AI API Key"
-            value={sarvamKey} onChange={(e) => setSarvamKey(e.target.value)} />
+
+          {/* Sarvam AI */}
+          <div className="provider-card" style={{ borderColor: countKeys(sarvamKeys) > 0 ? "rgba(34,197,94,0.3)" : undefined, marginTop: "10px" }}>
+            <div className="provider-header">
+              <span className="provider-name">🇮🇳 Sarvam AI (ہندی/اردو نیچرل آواز)</span>
+              {countKeys(sarvamKeys) > 0 && <span className="provider-saved">✅ {countKeys(sarvamKeys)} key(s)</span>}
+            </div>
+            <p style={{ color: "var(--text-muted)", fontSize: "11px", margin: "6px 0 8px" }}>
+              ہندوستانی AI کمپنی — ہندی/اردو کے لیے مخصوص، بالکل نیچرل آواز، فری ٹائر دستیاب!
+            </p>
+            {sarvamKeys.map((key, idx) => (
+              <KeyInputRow key={idx}
+                value={key}
+                onChange={(v) => updateKey("sarvam", idx, v)}
+                onRemove={() => removeKey("sarvam", idx)}
+                placeholder="Sarvam API Key"
+                canRemove={sarvamKeys.length > 1}
+              />
+            ))}
+            <div style={{ display: "flex", gap: "8px", marginTop: "6px" }}>
+              <button onClick={() => addKey("sarvam")} style={{
+                background: "rgba(59,130,246,0.15)", border: "1px solid rgba(59,130,246,0.3)",
+                borderRadius: "6px", color: "var(--accent-primary)", cursor: "pointer",
+                padding: "6px 12px", fontSize: "12px", fontWeight: 600,
+              }}>+ Add More</button>
+              <a href="https://sarvam.ai" target="_blank" rel="noopener noreferrer" className="provider-link">
+                🆓 Sarvam AI سے Key لیں →
+              </a>
+            </div>
+          </div>
+
+          {/* OpenAI TTS - auto-uses existing key */}
+          <div className="provider-card" style={{
+            borderColor: countKeys(openaiKeys) > 0 ? "rgba(34,197,94,0.3)" : undefined,
+            marginTop: "10px"
+          }}>
+            <div className="provider-header">
+              <span className="provider-name">🎵 OpenAI TTS HD (انگریز کے لیے نیچرل)</span>
+              {countKeys(openaiKeys) > 0 && <span className="provider-saved">✅ Auto</span>}
+            </div>
+            <p style={{ color: "var(--text-muted)", fontSize: "11px", margin: "6px 0 8px" }}>
+              آپ کی OpenAI API key خودکار استعمال ہوگی — صرف انگریزی کے لیے! اردو سپورٹ نہیں۔
+            </p>
+          </div>
+
+          {/* Priority Info */}
+          <div style={{ marginTop: "12px", padding: "10px", background: "rgba(59,130,246,0.1)", borderRadius: "8px", fontSize: "11px", color: "var(--text-muted)" }}>
+            <p style={{ fontWeight: 600, marginBottom: "4px" }}>📋 آواز کی ترجیح:</p>
+            <p>1️⃣ ElevenLabs Turbo (سب سے نیچرل — آپ کے اکاؤنٹ کی ہندی آوازیں خودکار ڈھونڈتا ہے)</p>
+            <p>2️⃣ Sarvam AI (ہندی/اردو مخصوص)</p>
+            <p>3️⃣ OpenAI TTS HD (صرف انگریزی)</p>
+            <p>4️⃣ Google Translate (روبوٹک — آخری آپشن)</p>
+            <p style={{ marginTop: "8px", fontWeight: 600, color: "#f59e0b" }}>💡 اہم: ElevenLabs کا فری ٹائر 10,000 کیرکٹرز/ماہ دیتا ہے۔ اگر آواز نہ آئے تو ٹیسٹ بٹن دبائیں!</p>
+          </div>
         </div>
 
         <div className="settings-actions">
+          <button className="btn-save" onClick={handleSave}>
+            💾 Save & Close
+          </button>
           <button className="btn-cancel" onClick={onClose}>Cancel</button>
-          <button className="btn-save" onClick={handleSave}>💾 Save</button>
         </div>
       </div>
     </div>
   );
 }
 
-// ============== RECORDING SECTION ==============
-function RecordingSection({ apiKeys }: { apiKeys: APIKeys }) {
-  const [recordText, setRecordText] = useState("");
-  const [recordSpeed, setRecordSpeed] = useState<"slow" | "normal" | "fast">("normal");
-  const [recordLang, setRecordLang] = useState<"ur" | "en">("ur");
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordProgress, setRecordProgress] = useState(0);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-
-  const speedLabels = {
-    slow: "آہستہ (Slow)",
-    normal: "نارمل (Normal)",
-    fast: "تیز (Fast)",
-  };
-
-  const handleRecord = useCallback(async () => {
-    if (!recordText.trim() || isRecording) return;
-    setIsRecording(true);
-    setRecordProgress(10);
-    setAudioUrl(null);
-
-    try {
-      const openaiKey = apiKeys.openai || localStorage.getItem("jarvis_openai_tts_key") || "";
-      const res = await fetch("/api/record", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: recordText,
-          lang: recordLang,
-          speed: recordSpeed,
-          apiKey: openaiKey || undefined,
-        }),
-      });
-
-      setRecordProgress(70);
-
-      const contentType = res.headers.get("content-type") || "";
-      if (contentType.includes("audio") || contentType.includes("mpeg")) {
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        setAudioUrl(url);
-        setRecordProgress(100);
-      } else {
-        // Browser TTS fallback
-        const data = await res.json();
-        if (data.useBrowserTTS && typeof window !== "undefined" && window.speechSynthesis) {
-          const utterance = new SpeechSynthesisUtterance(recordText);
-          utterance.lang = recordLang === "ur" ? "ur-PK" : "en-US";
-          utterance.rate = data.rate || 0.88;
-          utterance.pitch = data.pitch || 1.0;
-          utterance.onend = () => { setIsRecording(false); setRecordProgress(100); };
-          utterance.onerror = () => { setIsRecording(false); };
-          window.speechSynthesis.speak(utterance);
-          setRecordProgress(80);
-          return;
-        }
-        setRecordProgress(100);
-      }
-    } catch {
-      // Fallback to browser TTS
-      if (typeof window !== "undefined" && window.speechSynthesis) {
-        const speedMap = { slow: 0.65, normal: 0.88, fast: 1.3 };
-        const pitchMap = { slow: 0.9, normal: 1.0, fast: 1.05 };
-        const utterance = new SpeechSynthesisUtterance(recordText);
-        utterance.lang = recordLang === "ur" ? "ur-PK" : "en-US";
-        utterance.rate = speedMap[recordSpeed];
-        utterance.pitch = pitchMap[recordSpeed];
-        utterance.onend = () => { setIsRecording(false); setRecordProgress(100); };
-        window.speechSynthesis.speak(utterance);
-      }
-    } finally {
-      setTimeout(() => setIsRecording(false), 500);
-    }
-  }, [recordText, recordLang, recordSpeed, apiKeys, isRecording]);
-
-  const handlePreview = useCallback(() => {
-    if (!audioUrl) return;
-    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
-    const audio = new Audio(audioUrl);
-    audioRef.current = audio;
-    audio.onended = () => setIsPlaying(false);
-    audio.play();
-    setIsPlaying(true);
-  }, [audioUrl]);
-
-  const handleDownload = useCallback(() => {
-    if (!audioUrl) return;
-    const a = document.createElement("a");
-    a.href = audioUrl;
-    a.download = `jarvis-recording-${Date.now()}.mp3`;
-    a.click();
-  }, [audioUrl]);
-
-  // Wave bars for recording visualization
-  const recWaveBars = Array.from({ length: 30 }, (_, i) => (
-    <div
-      key={i}
-      className="rec-wave-bar"
-      style={{
-        animationDelay: `${i * 0.05}s`,
-        animationDuration: `${0.6 + Math.random() * 0.8}s`,
-      }}
-    />
-  ));
-
-  return (
-    <div className="recording-section">
-      <div className="recording-header">
-        <div className="recording-title">🎙️ Recording Studio</div>
-        <div className="recording-subtitle">Text-to-Speech recording with speed control — اپنی آواز ریکارڈ کریں</div>
-      </div>
-
-      {/* Text input */}
-      <textarea
-        className="recording-textarea"
-        value={recordText}
-        onChange={(e) => setRecordText(e.target.value)}
-        placeholder="یہاں متن لکھیں یا پیسٹ کریں...&#10;Type or paste your content here for recording..."
-        dir="auto"
-      />
-
-      {/* Voice selection */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, color: "var(--text-secondary)", fontWeight: 500 }}>Voice:</span>
-        <div className="voice-toggle">
-          <button
-            className={`voice-toggle-btn ${recordLang === "ur" ? "active" : ""}`}
-            onClick={() => setRecordLang("ur")}
-          >
-            🇵🇰 Urdu
-          </button>
-          <button
-            className={`voice-toggle-btn ${recordLang === "en" ? "active" : ""}`}
-            onClick={() => setRecordLang("en")}
-          >
-            🇺🇸 English
-          </button>
-        </div>
-      </div>
-
-      {/* Speed control */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, color: "var(--text-secondary)", fontWeight: 500 }}>Speed:</span>
-        <div className="recording-controls">
-          {(["slow", "normal", "fast"] as const).map((speed) => (
-            <button
-              key={speed}
-              className={`speed-btn ${recordSpeed === speed ? "active" : ""}`}
-              onClick={() => setRecordSpeed(speed)}
-            >
-              {speedLabels[speed]}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Recording wave */}
-      {isRecording && (
-        <div className="rec-wave-container">
-          {recWaveBars}
-        </div>
-      )}
-
-      {/* Progress */}
-      {isRecording && (
-        <div className="recording-progress">
-          <div className="recording-progress-bar" style={{ width: `${recordProgress}%` }}></div>
-        </div>
-      )}
-
-      {/* Action buttons */}
-      <div className="recording-actions">
-        <button className="rec-btn primary" onClick={handleRecord} disabled={!recordText.trim() || isRecording}>
-          {isRecording ? "⏳ Recording..." : "🎙️ Record"}
-        </button>
-        <button className="rec-btn" onClick={handlePreview} disabled={!audioUrl || isPlaying}>
-          ▶️ Preview
-        </button>
-        <button className="rec-btn" onClick={handleDownload} disabled={!audioUrl}>
-          💾 Download
-        </button>
-        {isPlaying && (
-          <button className="rec-btn danger" onClick={() => { audioRef.current?.pause(); setIsPlaying(false); }}>
-            ⏹️ Stop
-          </button>
-        )}
-      </div>
-    </div>
-  );
+// ============== HELPERS ==============
+function formatMessage(content: string): string {
+  let f = content;
+  f = f.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code class="language-${lang}">${escapeHtml(code.trim())}</code></pre>`);
+  f = f.replace(/`([^`]+)`/g, "<code>$1</code>");
+  f = f.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  f = f.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  f = f.replace(/\[([^\]]+)\]\(([^)]+)\)/g,
+    '<a href="$2" target="_blank" style="color: var(--accent-tertiary);">$1</a>');
+  f = f.replace(/\n/g, "<br/>");
+  return f;
 }
 
-// ============== SETTINGS SECTION ==============
-function SettingsSection({
-  apiKeys, activeProvider, hasAnyKey, saveApiKeys, saveActiveProvider,
-}: {
-  apiKeys: APIKeys;
-  activeProvider: LLMProvider;
-  hasAnyKey: boolean;
-  saveApiKeys: (keys: APIKeys) => void;
-  saveActiveProvider: (provider: LLMProvider) => void;
-}) {
-  const [localKeys, setLocalKeys] = useState<APIKeys>({ ...apiKeys });
-  const [localProvider, setLocalProvider] = useState<LLMProvider>(activeProvider);
-  const [elevenlabsKey, setElevenlabsKey] = useState(() => {
-    if (typeof window === "undefined") return "";
-    return localStorage.getItem("jarvis_elevenlabs_key") || "";
-  });
-  const [sarvamKey, setSarvamKey] = useState(() => {
-    if (typeof window === "undefined") return "";
-    return localStorage.getItem("jarvis_sarvam_key") || "";
-  });
-  const [openaiTTSKey, setOpenaiTTSKey] = useState(() => {
-    if (typeof window === "undefined") return "";
-    return localStorage.getItem("jarvis_openai_tts_key") || "";
-  });
-
-  // Auto-update settings
-  const [githubRepo, setGithubRepo] = useState(() => localStorage.getItem("jarvis_github_repo") || "");
-  const [githubToken, setGithubToken] = useState(() => localStorage.getItem("jarvis_github_token") || "");
-  const [autoUpdate, setAutoUpdate] = useState(() => localStorage.getItem("jarvis_auto_update") === "true");
-  const [updateStatus, setUpdateStatus] = useState<string>("up-to-date");
-  const [currentVersion] = useState("2.0.0");
-
-  // Preferences
-  const [defaultLang, setDefaultLang] = useState(() => localStorage.getItem("jarvis_default_lang") || "mixed");
-  const [personality, setPersonality] = useState(() => localStorage.getItem("jarvis_personality") || "friendly");
-  const [voiceSpeed, setVoiceSpeed] = useState(() => {
-    const v = localStorage.getItem("jarvis_voice_speed");
-    return v ? parseFloat(v) : 0.88;
-  });
-
-  const checkForUpdates = async () => {
-    setUpdateStatus("checking");
-    try {
-      const res = await fetch(`/api/update?repo=${encodeURIComponent(githubRepo)}&token=${encodeURIComponent(githubToken)}`);
-      const data = await res.json();
-      setUpdateStatus(data.hasUpdate ? "update-available" : "up-to-date");
-    } catch {
-      setUpdateStatus("error");
-    }
-  };
-
-  const handleSave = () => {
-    saveApiKeys(localKeys);
-    saveActiveProvider(localProvider);
-    localStorage.setItem("jarvis_elevenlabs_key", elevenlabsKey);
-    localStorage.setItem("jarvis_sarvam_key", sarvamKey);
-    localStorage.setItem("jarvis_openai_tts_key", openaiTTSKey);
-    localStorage.setItem("jarvis_github_repo", githubRepo);
-    localStorage.setItem("jarvis_github_token", githubToken);
-    localStorage.setItem("jarvis_auto_update", String(autoUpdate));
-    localStorage.setItem("jarvis_default_lang", defaultLang);
-    localStorage.setItem("jarvis_personality", personality);
-    localStorage.setItem("jarvis_voice_speed", String(voiceSpeed));
-  };
-
-  const llmProviders: Array<{ id: LLMProvider; name: string; keyPlaceholder: string; getKeyUrl: string }> = [
-    { id: "groq", name: "Groq (Llama 3.3 70B)", keyPlaceholder: "gsk_...", getKeyUrl: "https://console.groq.com" },
-    { id: "gemini", name: "Google Gemini 1.5 Flash", keyPlaceholder: "AIza...", getKeyUrl: "https://aistudio.google.com/apikey" },
-    { id: "openai", name: "OpenAI (GPT-4o Mini)", keyPlaceholder: "sk-...", getKeyUrl: "https://platform.openai.com/api-keys" },
-    { id: "zai", name: "ZAI (GLM-4 Flash)", keyPlaceholder: "your-zai-api-key", getKeyUrl: "https://open.bigmodel.cn" },
-    { id: "xai", name: "xAI / Grok", keyPlaceholder: "xai-...", getKeyUrl: "https://console.x.ai" },
-    { id: "anthropic", name: "Anthropic / Claude", keyPlaceholder: "sk-ant-...", getKeyUrl: "https://console.anthropic.com" },
-  ];
-
-  const ttsProviders = [
-    { name: "ElevenLabs API Key", value: elevenlabsKey, setValue: setElevenlabsKey, placeholder: "ElevenLabs key..." },
-    { name: "Sarvam AI API Key", value: sarvamKey, setValue: setSarvamKey, placeholder: "Sarvam key..." },
-    { name: "OpenAI TTS Key (extra)", value: openaiTTSKey, setValue: setOpenaiTTSKey, placeholder: "sk-..." },
-  ];
-
-  return (
-    <div className="settings-section">
-      <div className="settings-title">⚙️ Settings</div>
-
-      {/* A. LLM API Keys */}
-      <div className="settings-category">
-        <div className="settings-category-title">🔑 A. LLM API Keys</div>
-        <label style={{ fontWeight: 600, marginBottom: "8px", display: "block", fontSize: 13 }}>🎯 Active Provider</label>
-        <select
-          value={localProvider}
-          onChange={(e) => setLocalProvider(e.target.value as LLMProvider)}
-          className="form-select"
-          style={{ marginBottom: 12 }}
-        >
-          {llmProviders.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-        {llmProviders.map((p) => (
-          <div key={p.id} className="provider-card">
-            <div className="provider-header">
-              <span className="provider-name">{p.name}</span>
-              {localKeys[p.id] && localKeys[p.id]!.trim() && <span className="provider-saved">✓ Saved</span>}
-            </div>
-            <input className="provider-input" type="password" placeholder={p.keyPlaceholder}
-              value={localKeys[p.id] || ""}
-              onChange={(e) => setLocalKeys({ ...localKeys, [p.id]: e.target.value })} />
-            <a className="provider-link" href={p.getKeyUrl} target="_blank" rel="noopener noreferrer">
-              Get API Key →
-            </a>
-          </div>
-        ))}
-      </div>
-
-      {/* B. TTS Keys */}
-      <div className="settings-category">
-        <div className="settings-category-title">🔊 B. TTS Keys</div>
-        {ttsProviders.map((p) => (
-          <div key={p.name} className="provider-card">
-            <div className="provider-header">
-              <span className="provider-name">{p.name}</span>
-              {p.value.trim() && <span className="provider-saved">✓</span>}
-            </div>
-            <input className="provider-input" type="password" placeholder={p.placeholder}
-              value={p.value} onChange={(e) => p.setValue(e.target.value)} />
-          </div>
-        ))}
-      </div>
-
-      {/* C. Auto-Update Settings */}
-      <div className="settings-category">
-        <div className="settings-category-title">🔄 C. Auto-Update Settings</div>
-        <div className="update-card">
-          <div className="provider-card">
-            <span className="provider-name">GitHub Repository</span>
-            <input className="provider-input" type="text" placeholder="username/JARVIS-HYBRID"
-              value={githubRepo} onChange={(e) => setGithubRepo(e.target.value)} />
-          </div>
-          <div className="provider-card">
-            <span className="provider-name">GitHub Personal Access Token</span>
-            <input className="provider-input" type="password" placeholder="ghp_..."
-              value={githubToken} onChange={(e) => setGithubToken(e.target.value)} />
-          </div>
-          <div className="toggle-row">
-            <span className="toggle-label">Auto-Update</span>
-            <div className={`toggle-switch ${autoUpdate ? "on" : ""}`}
-              onClick={() => setAutoUpdate(!autoUpdate)} />
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
-            <button className="quick-btn" onClick={checkForUpdates}>🔄 Check for Updates</button>
-            <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
-              Current: v{currentVersion} · {updateStatus === "up-to-date" ? "✓ Up to date" :
-                updateStatus === "update-available" ? "⚠️ Update available" :
-                updateStatus === "error" ? "✗ Check failed" : "⏳ Checking..."}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* D. Preferences */}
-      <div className="settings-category">
-        <div className="settings-category-title">🎨 D. Preferences</div>
-        <div className="provider-card">
-          <span className="provider-name">Default Language</span>
-          <select className="form-select" value={defaultLang} onChange={(e) => setDefaultLang(e.target.value)}>
-            <option value="ur">Urdu / اردو</option>
-            <option value="en">English</option>
-            <option value="mixed">Mixed / مکس</option>
-          </select>
-        </div>
-        <div className="provider-card">
-          <span className="provider-name">Personality</span>
-          <select className="form-select" value={personality} onChange={(e) => setPersonality(e.target.value)}>
-            <option value="friendly">Friendly / دوستانہ</option>
-            <option value="professional">Professional / پیشہ ور</option>
-            <option value="casual">Casual / آسان</option>
-          </select>
-        </div>
-        <div className="provider-card">
-          <span className="provider-name">Voice Speed: {voiceSpeed.toFixed(2)}x</span>
-          <input type="range" className="pref-slider" min="0.5" max="2" step="0.05"
-            value={voiceSpeed} onChange={(e) => setVoiceSpeed(parseFloat(e.target.value))} />
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--text-muted)" }}>
-            <span>Slow</span><span>Normal</span><span>Fast</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="settings-actions">
-        <button className="btn-cancel" onClick={() => {
-          setLocalKeys({ ...apiKeys });
-          setLocalProvider(activeProvider);
-        }}>Reset</button>
-        <button className="btn-save" onClick={handleSave}>💾 Save All Settings</button>
-      </div>
-    </div>
-  );
-}
-
-// ============== RESEARCH SECTION ==============
-function ResearchSection({ apiKeys }: { apiKeys: APIKeys }) {
-  const [entries, setEntries] = useState<ResearchEntry[]>([]);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [filterCategory, setFilterCategory] = useState<ResearchCategory | "all">("all");
-  const [showNewEntry, setShowNewEntry] = useState(false);
-  const [askAiQuery, setAskAiQuery] = useState("");
-  const [isAskingAi, setIsAskingAi] = useState(false);
-  const [aiResults, setAiResults] = useState<Array<{ source: string; response: string }>>([]);
-
-  // New entry form state
-  const [newTitle, setNewTitle] = useState("");
-  const [newContent, setNewContent] = useState("");
-  const [newCategory, setNewCategory] = useState<ResearchCategory>("general");
-  const [newSource, setNewSource] = useState<ResearchSource>("Self");
-
-  // Load from localStorage
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem("jarvis_research_entries");
-      if (saved) setEntries(JSON.parse(saved));
-    } catch {}
-  }, []);
-
-  // Save to localStorage
-  useEffect(() => {
-    localStorage.setItem("jarvis_research_entries", JSON.stringify(entries));
-  }, [entries]);
-
-  const addEntry = (entry: Omit<ResearchEntry, "id" | "date">) => {
-    const newEntry: ResearchEntry = {
-      ...entry,
-      id: `res_${Date.now()}`,
-      date: Date.now(),
-    };
-    setEntries(prev => [newEntry, ...prev]);
-  };
-
-  const deleteEntry = (id: string) => {
-    setEntries(prev => prev.filter(e => e.id !== id));
-  };
-
-  const handleNewEntry = () => {
-    if (!newTitle.trim() || !newContent.trim()) return;
-    addEntry({ title: newTitle, content: newContent, category: newCategory, source: newSource });
-    setNewTitle(""); setNewContent(""); setShowNewEntry(false);
-  };
-
-  const handleAskAi = async () => {
-    if (!askAiQuery.trim() || isAskingAi) return;
-    setIsAskingAi(true);
-    setAiResults([]);
-    try {
-      const res = await fetch("/api/research", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: askAiQuery, apiKeys }),
-      });
-      const data = await res.json();
-      if (data.results) {
-        setAiResults(data.results.filter((r: any) => r.response));
-        // Auto-add as research entry
-        if (data.results.length > 0) {
-          const combinedResponse = data.results
-            .filter((r: any) => r.response)
-            .map((r: any) => `**${r.source}:** ${r.response}`)
-            .join("\n\n---\n\n");
-          addEntry({
-            title: askAiQuery.substring(0, 100),
-            content: combinedResponse.substring(0, 5000),
-            category: "general",
-            source: "Self",
-          });
-        }
-      }
-    } catch {
-      setAiResults([{ source: "Error", response: "Failed to query AI providers. Check your API keys." }]);
-    } finally {
-      setIsAskingAi(false);
-    }
-  };
-
-  const filteredEntries = entries
-    .filter(e => filterCategory === "all" || e.category === filterCategory)
-    .filter(e => !searchQuery || e.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      e.content.toLowerCase().includes(searchQuery.toLowerCase()));
-
-  const categoryLabels: Record<string, string> = {
-    all: "🔍 All",
-    earning: "💰 Earning",
-    "self-improvement": "📈 Self-Improvement",
-    technical: "⚙️ Technical",
-    general: "📋 General",
-  };
-
-  const formatDate = (ts: number) => new Date(ts).toLocaleDateString("en-US", {
-    month: "short", day: "numeric", year: "numeric",
-  });
-
-  return (
-    <div className="research-section">
-      <div className="research-header">
-        <div>
-          <div className="research-title">📚 Research Log</div>
-          <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 4 }}>
-            Knowledge base & multi-AI research — تحقیق اور علم کا ذخیرہ
-          </div>
-        </div>
-        <button className="quick-btn" onClick={() => setShowNewEntry(true)}>➕ New Research</button>
-      </div>
-
-      {/* Search */}
-      <div className="research-search">
-        <input
-          className="research-search-input"
-          placeholder="Search research entries..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-        />
-      </div>
-
-      {/* Category filters */}
-      <div className="research-filters">
-        {(["all", "earning", "self-improvement", "technical", "general"] as const).map((cat) => (
-          <button
-            key={cat}
-            className={`filter-btn ${filterCategory === cat ? "active" : ""}`}
-            onClick={() => setFilterCategory(cat)}
-          >
-            {categoryLabels[cat]}
-          </button>
-        ))}
-      </div>
-
-      {/* Ask AI */}
-      <div style={{ background: "var(--bg-glass)", border: "1px solid var(--border-color)", borderRadius: "var(--radius-md)", padding: 16 }}>
-        <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>🤖 Ask Multiple AIs</div>
-        <div className="ask-ai-form">
-          <input
-            className="ask-ai-input"
-            placeholder="Ask anything — multiple AI sources will research it..."
-            value={askAiQuery}
-            onChange={(e) => setAskAiQuery(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleAskAi()}
-          />
-          <button className="ask-ai-btn" onClick={handleAskAi} disabled={isAskingAi || !askAiQuery.trim()}>
-            {isAskingAi ? "⏳ Researching..." : "🔍 Ask AI"}
-          </button>
-        </div>
-        {aiResults.length > 0 && (
-          <div style={{ marginTop: 12 }}>
-            {aiResults.map((r, i) => (
-              <div key={i} style={{ marginBottom: 12 }}>
-                <div style={{ fontWeight: 600, fontSize: 12, color: "var(--accent-tertiary)", marginBottom: 4 }}>
-                  {r.source}
-                </div>
-                <div style={{ fontSize: 13, color: "var(--text-secondary)", lineHeight: 1.6, maxHeight: 150, overflow: "auto" }}
-                  dangerouslySetInnerHTML={{ __html: formatMessage(r.response) }} />
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Entries list */}
-      <div className="research-list">
-        {filteredEntries.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon">📚</div>
-            <div className="empty-state-text">No research entries yet</div>
-            <div className="empty-state-sub">Add your first research entry or ask AI to research something</div>
-          </div>
-        ) : (
-          filteredEntries.map((entry) => (
-            <div key={entry.id} className="research-entry">
-              <div className="research-entry-header">
-                <div className="research-entry-title">{entry.title}</div>
-                <div className="research-entry-meta">
-                  <span className="research-entry-source">{entry.source}</span>
-                  <span className="research-entry-date">{formatDate(entry.date)}</span>
-                </div>
-              </div>
-              <div className="research-entry-content"
-                dangerouslySetInnerHTML={{ __html: formatMessage(entry.content.substring(0, 500)) }} />
-              <div className="research-entry-actions">
-                <button className="research-entry-btn">{categoryLabels[entry.category] || entry.category}</button>
-                <button className="research-entry-btn danger" onClick={() => deleteEntry(entry.id)}>🗑️ Delete</button>
-              </div>
-            </div>
-          ))
-        )}
-      </div>
-
-      {/* New Entry Modal */}
-      {showNewEntry && (
-        <div className="modal-overlay" onClick={() => setShowNewEntry(false)}>
-          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-title">📝 New Research Entry</div>
-            <div className="form-group">
-              <label className="form-label">Title</label>
-              <input className="form-input" placeholder="Research title..."
-                value={newTitle} onChange={(e) => setNewTitle(e.target.value)} />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Content</label>
-              <textarea className="form-textarea" placeholder="Research content..."
-                value={newContent} onChange={(e) => setNewContent(e.target.value)} />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Category</label>
-              <select className="form-select" value={newCategory} onChange={(e) => setNewCategory(e.target.value as ResearchCategory)}>
-                <option value="earning">💰 Earning Methods</option>
-                <option value="self-improvement">📈 Self-Improvement</option>
-                <option value="technical">⚙️ Technical</option>
-                <option value="general">📋 General</option>
-              </select>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Source</label>
-              <select className="form-select" value={newSource} onChange={(e) => setNewSource(e.target.value as ResearchSource)}>
-                <option value="Self">Self</option>
-                <option value="ChatGPT">ChatGPT</option>
-                <option value="xAI">xAI</option>
-                <option value="Claude">Claude</option>
-                <option value="Grok">Grok</option>
-                <option value="Gemini">Gemini</option>
-              </select>
-            </div>
-            <div className="settings-actions">
-              <button className="btn-cancel" onClick={() => setShowNewEntry(false)}>Cancel</button>
-              <button className="btn-save" onClick={handleNewEntry}>💾 Add Entry</button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }

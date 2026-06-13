@@ -7,8 +7,8 @@ import type { JarvisMessage, APIKeys, LLMProvider } from "@/lib/protocol";
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { message, userId, history, stream, apiKeys, activeProvider, file } = body as {
+    const contentType = request.headers.get("content-type") || "";
+    let payload: {
       message: string;
       userId: string;
       history?: JarvisMessage[];
@@ -17,6 +17,41 @@ export async function POST(request: NextRequest) {
       activeProvider?: LLMProvider;
       file?: { name: string; type: string; dataUrl: string } | null;
     };
+
+    if (contentType.includes("multipart/form-data")) {
+      const form = await request.formData();
+      const uploaded = form.get("file");
+      let file: { name: string; type: string; dataUrl: string } | null = null;
+
+      if (uploaded instanceof File) {
+        const bytes = Buffer.from(await uploaded.arrayBuffer());
+        const base64 = bytes.toString("base64");
+        file = {
+          name: uploaded.name,
+          type: uploaded.type || "application/octet-stream",
+          dataUrl: `data:${uploaded.type || "application/octet-stream"};base64,${base64}`,
+        };
+      }
+
+      let parsedKeys: APIKeys = {};
+      const rawKeys = form.get("apiKeys");
+      if (typeof rawKeys === "string" && rawKeys.trim()) {
+        try { parsedKeys = JSON.parse(rawKeys); } catch { parsedKeys = {}; }
+      }
+
+      payload = {
+        message: String(form.get("message") || "Please analyze this file."),
+        userId: String(form.get("userId") || ""),
+        stream: false,
+        apiKeys: parsedKeys,
+        activeProvider: (String(form.get("activeProvider") || "groq") as LLMProvider),
+        file,
+      };
+    } else {
+      payload = await request.json();
+    }
+
+    const { message, userId, history, stream, apiKeys, activeProvider, file } = payload;
 
     if (!message || !userId) {
       return NextResponse.json({ error: "message and userId are required" }, { status: 400 });

@@ -25,7 +25,8 @@ async function tryElevenLabs(
   text: string,
   lang: string,
   emotion: string,
-  apiKeys: string[]
+  apiKeys: string[],
+  preferredVoiceId?: string
 ): Promise<Response | null> {
   if (apiKeys.length === 0) return null;
 
@@ -34,7 +35,7 @@ async function tryElevenLabs(
     ur: "Xb7hH8MSUJpWjnnlVkGX",   // Matilda — natural Hindi/Urdu
     en: "EXAVITQu4vr4xnSDxMaL",    // Bella — natural English
   };
-  const voiceId = voiceIds[lang] || voiceIds.ur;
+  const voiceId = preferredVoiceId?.trim() || voiceIds[lang] || voiceIds.ur;
 
   const emotionSettings: Record<string, { stability: number; similarity: number; style: number }> = {
     happy:       { stability: 0.35, similarity: 0.75, style: 0.8 },
@@ -343,16 +344,16 @@ export async function POST(req: NextRequest) {
     }
 
     // Parse multi-keys (comma-separated)
-    const elevenlabsKeys = parseKeys(body.elevenlabsKey);
-    const sarvamKeys = parseKeys(body.sarvamKey);
-    const openaiKeys = parseKeys(body.openaiKey);
+    const elevenlabsKeys = parseKeys(body.elevenlabsKey || process.env.ELEVENLABS_API_KEY);
+    const sarvamKeys = parseKeys(body.sarvamKey || process.env.SARVAM_API_KEY);
+    const openaiKeys = parseKeys(body.openaiKey || process.env.OPENAI_API_KEY);
 
     console.log(`[TTS] Request: lang=${lang}, emotion=${emotion}, text="${text.substring(0, 50)}..."`);
     console.log(`[TTS] Keys: elevenLabs=${elevenlabsKeys.length}, sarvam=${sarvamKeys.length}, openai=${openaiKeys.length}`);
 
     // Priority 1: ElevenLabs Turbo v2.5 — THE BEST
     if (elevenlabsKeys.length > 0) {
-      const result = await tryElevenLabs(text, lang, emotion, elevenlabsKeys);
+      const result = await tryElevenLabs(text, lang, emotion, elevenlabsKeys, body.voiceId || process.env.ELEVENLABS_VOICE_ID);
       if (result) return result;
     }
 

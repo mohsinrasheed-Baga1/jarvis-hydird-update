@@ -13,6 +13,11 @@ import requests
 import websocket
 from typing import Dict, Any, Optional
 
+try:
+    from jarvis.local_agents.windows_agent import LocalWindowsAgent
+except Exception:
+    LocalWindowsAgent = None
+
 # Conditional imports for desktop features
 try:
     import pyautogui
@@ -42,6 +47,7 @@ class DesktopConnector:
         self.running = False
         self.ws_connection = None
         self.config = self._load_config()
+        self.windows_agent = LocalWindowsAgent() if LocalWindowsAgent else None
 
     def _load_config(self) -> Dict[str, Any]:
         """Load desktop configuration"""
@@ -99,7 +105,10 @@ class DesktopConnector:
         poll_thread.start()
 
     def _poll_loop(self):
-        """Poll cloud for pending tasks"""
+        """Poll cloud for pending tasks every 2 seconds"""
+        print("[Connector] Starting task poll loop...")
+        consecutive_failures = 0
+
         while self.running:
             try:
                 response = requests.get(
@@ -109,11 +118,21 @@ class DesktopConnector:
                 )
                 if response.status_code == 200:
                     data = response.json()
-                    if data.get("tasks"):
-                        for task in data["tasks"]:
+                    tasks = data.get("tasks", [])
+                    if tasks:
+                        print(f"[Connector] Found {len(tasks)} pending tasks")
+                        for task in tasks:
                             self._execute_local_task(task)
-            except requests.RequestException:
-                pass
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures % 10 == 0:
+                        print(f"[Connector] Cloud returned status {response.status_code}")
+            except requests.RequestException as e:
+                consecutive_failures += 1
+                if consecutive_failures == 1:
+                    print(f"[Connector] Connection error (will retry): {e}")
+
             time.sleep(2)
 
     # ============== CHAT ==============
@@ -139,26 +158,44 @@ class DesktopConnector:
 
     def _execute_local_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a local task from cloud"""
-        agent = task.get("type", "")
+        # Ensure task has required fields
+        task_id = task.get("taskId")
+        task_type = task.get("type", "")
         action = task.get("action", "")
         params = task.get("params", {})
-        task_id = task.get("taskId", str(int(time.time())))
 
-        print(f"[Connector] Executing local task: {agent}/{action}")
+        if not task_id:
+            print("[Connector] ❌ Task missing taskId!")
+            return {}
 
-        result = {"taskId": task_id, "success": False}
+        print(f"[Connector] Executing task {task_id}: {task_type}/{action}")
+
+        result = {
+            "taskId": task_id,
+            "userId": self.user_id,
+            "success": False,
+            "error": "Unknown error",
+        }
 
         try:
-            if agent == "windows":
-                result = self._handle_windows_task(action, params)
-            elif agent == "file":
-                result = self._handle_file_task(action, params)
-            elif agent == "upload":
-                result = self._handle_upload_task(action, params)
+            if task_type == "windows":
+                result.update(self._handle_windows_task(action, params))
+            elif task_type == "file":
+                result.update(self._handle_file_task(action, params))
+            elif task_type == "upload":
+                result.update(self._handle_upload_task(action, params))
+            elif task_type == "browser":
+                result.update(self._handle_browser_task(action, params))
+            elif task_type == "search":
+                result.update(self._handle_search_task(action, params))
             else:
-                result = {"taskId": task_id, "success": False, "error": f"Unknown agent: {agent}"}
+                result["error"] = f"Unknown task type: {task_type}"
         except Exception as e:
-            result = {"taskId": task_id, "success": False, "error": str(e)}
+            result["error"] = str(e)
+
+        # Always include taskId and userId in result
+        result["taskId"] = task_id
+        result["userId"] = self.user_id
 
         # Report result back to cloud
         self._report_result(result)
@@ -166,14 +203,30 @@ class DesktopConnector:
 
     def _handle_windows_task(self, action: str, params: Dict) -> Dict[str, Any]:
         """Handle Windows/System control tasks"""
+        if self.windows_agent:
+            mapped = {
+                "set_volume": "set_volume",
+                "volume_up": "volume_up",
+                "volume_down": "volume_down",
+                "mute_toggle": "mute_toggle",
+                "open_url": "open_url",
+            }.get(action, action)
+            result = self.windows_agent.handle(mapped, params)
+            if result.get("success") or not str(result.get("error", "")).startswith("Unknown action"):
+                return result
+
         if action == "screenshot":
             return self._take_screenshot(params)
         elif action == "open_app":
             return self._open_app(params)
+        elif action == "open_url":
+            return self._open_url(params)
         elif action == "system_info":
             return self._get_system_info()
-        elif action == "volume":
+        elif action in ("volume", "set_volume"):
             return self._set_volume(params)
+        elif action in ("volume_up", "volume_down", "mute_toggle"):
+            return {"success": False, "error": "Volume hotkeys require LocalWindowsAgent"}
         elif action == "brightness":
             return self._set_brightness(params)
         else:
@@ -201,6 +254,24 @@ class DesktopConnector:
             "error": "Upload agent requires browser automation. Run locally with full desktop agent.",
             "message": "Upload functionality needs the full local desktop agent with Playwright.",
         }
+
+    def _handle_browser_task(self, action: str, params: Dict) -> Dict[str, Any]:
+        """Handle browser automation tasks"""
+        if action == "open_url":
+            return self._open_url(params)
+        elif action == "search":
+            return self._browser_search(params)
+        else:
+            return {"success": False, "error": f"Unknown browser action: {action}"}
+
+    def _handle_search_task(self, action: str, params: Dict) -> Dict[str, Any]:
+        """Handle search tasks"""
+        if action == "google":
+            return self._google_search(params)
+        elif action == "youtube":
+            return self._youtube_search(params)
+        else:
+            return {"success": False, "error": f"Unknown search action: {action}"}
 
     # ============== WINDOWS TASKS ==============
 
@@ -386,6 +457,58 @@ class DesktopConnector:
 
     # ============== REPORT ==============
 
+    def _open_url(self, params: Dict) -> Dict[str, Any]:
+        """Open a URL in the default browser"""
+        url = params.get("url", "")
+        if not url:
+            return {"success": False, "error": "URL required"}
+
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            return {"success": True, "message": f"Opened URL: {url}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _browser_search(self, params: Dict) -> Dict[str, Any]:
+        """Search in browser (generic)"""
+        query = params.get("query", "")
+        if not query:
+            return {"success": False, "error": "Query required"}
+
+        import webbrowser
+        try:
+            webbrowser.open(f"https://www.google.com/search?q={query}")
+            return {"success": True, "message": f"Searching for: {query}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _google_search(self, params: Dict) -> Dict[str, Any]:
+        """Google search"""
+        query = params.get("query", "")
+        if not query:
+            return {"success": False, "error": "Query required"}
+
+        import webbrowser
+        try:
+            webbrowser.open(f"https://www.google.com/search?q={query}")
+            return {"success": True, "message": f"Google search: {query}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def _youtube_search(self, params: Dict) -> Dict[str, Any]:
+        """YouTube search"""
+        query = params.get("query", "")
+        if not query:
+            return {"success": False, "error": "Query required"}
+
+        import webbrowser
+        try:
+            webbrowser.open(f"https://www.youtube.com/results?search_query={query}")
+            return {"success": True, "message": f"YouTube search: {query}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     def _report_result(self, result: Dict[str, Any]):
         """Report task result back to cloud"""
         try:
@@ -394,8 +517,9 @@ class DesktopConnector:
                 json=result,
                 timeout=10,
             )
-        except requests.RequestException:
-            print("[Connector] Could not report result to cloud")
+            print(f"[Connector] Result reported for task {result.get('taskId')}")
+        except requests.RequestException as e:
+            print(f"[Connector] Could not report result to cloud: {e}")
 
 
 # ============== CLI INTERFACE ==============

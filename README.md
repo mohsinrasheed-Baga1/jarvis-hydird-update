@@ -23,42 +23,101 @@ A hybrid AI assistant that runs its brain on the cloud (Vercel) and controls you
 └── CustomTkinter GUI
 ```
 
-## 🚀 Vercel Deployment (Step-by-Step)
+## 🖥️ Local Windows Development (Quick Start)
+
+Perfect for testing and development on Windows. Run both cloud and desktop agents locally.
+
+### Prerequisites
+- Windows 10 or 11
+- Python 3.11+ ([python.org](https://www.python.org/downloads/))
+- Node.js 18+ ([nodejs.org](https://nodejs.org/))
+- VS Code ([code.visualstudio.com](https://code.visualstudio.com/))
+
+### Setup (One-Time)
+
+1. **Open VS Code** terminal at the project root
+2. **Run setup script:**
+   ```bash
+   setup_windows.bat
+   ```
+   This will:
+   - Create Python virtual environment
+   - Install Python dependencies
+   - Install Node.js packages
+   - Optionally install Playwright browsers
+
+### Running Locally
+
+**Open TWO terminal windows in VS Code:**
+
+**Terminal 1 - Cloud Backend (Next.js):**
+```bash
+run_cloud.bat
+```
+Cloud will start at `http://localhost:3000`
+
+**Terminal 2 - Desktop Agent (Python):**
+```bash
+run_desktop.bat
+```
+Agent connects to local cloud backend
+
+### Testing Desktop Automation
+
+In the desktop agent terminal, try these commands:
+
+```
+take screenshot
+open notepad
+open https://youtube.com
+google search python tutorials
+type_text Hello World
+click 500 500
+system info
+!help
+```
+
+### Or Start Everything at Once
+
+```bash
+run_all_dev.bat
+```
+
+This launches cloud and desktop in separate windows.
+
+---
+
+## ☁️ Vercel Deployment (Production)
 
 ### Step 1: Import Repo
 1. Go to [vercel.com/new](https://vercel.com/new)
-2. Import `mohsinrasheed-Baga1/JARVIS-HYBRID`
+2. Import your fork of `JARVIS-HYBRID`
 
-### Step 2: Configure Root Directory (CRITICAL!)
-1. In the import screen, click **"Configure"**
-2. Find **"Root Directory"** setting
-3. Type **`cloud`** and select it
-4. This tells Vercel that the Next.js app is inside the `cloud/` folder
+### Step 2: Root Directory (CRITICAL!)
+- **Root Directory:** Leave empty (Next.js app is at repository root)
+- The Next.js app is NOT in a `cloud/` subfolder
 
 ### Step 3: Deploy
 1. Click **"Deploy"**
-2. Wait for build to complete (should take ~30 seconds)
+2. Wait for build to complete (~30 seconds)
 
 ### Step 4: Add API Keys
 1. Open your deployed app URL
-2. Click the **⚙️ Settings** button in the top-right
+2. Click **⚙️ Settings** in top-right
 3. Add at least one API key:
-   - 🆓 **Groq** (Free) — [console.groq.com](https://console.groq.com)
-   - 🆓 **Gemini** (Free) — [aistudio.google.com](https://aistudio.google.com/apikey)
+   - 🆓 **Groq** — [console.groq.com](https://console.groq.com)
+   - 🆓 **Gemini** — [aistudio.google.com](https://aistudio.google.com/apikey)
    - 💰 **OpenAI** — [platform.openai.com](https://platform.openai.com/api-keys)
    - 🆓 **ZAI** — [open.bigmodel.cn](https://open.bigmodel.cn)
 4. Click **💾 Save & Close**
 
-That's it! Your JARVIS is live! 🎉
+> **Note:** API keys are stored in browser localStorage. They are never sent to our servers except to make LLM API calls on your behalf.
 
-> **Note:** API keys are stored in your browser's localStorage. They are never sent to our servers except to make LLM API calls on your behalf.
-
-## 🖥️ Desktop Agent
+### Connect Desktop Agent to Cloud
 
 ```bash
 cd desktop
-pip install -r requirements.txt
-python -m jarvis.main --cloud-url https://your-jarvis.vercel.app --gui
+python -m jarvis.main --cloud-url https://your-deployed-app.vercel.app --gui
 ```
 
 ## 🌐 Features
