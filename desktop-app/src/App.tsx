@@ -22,12 +22,23 @@ const navItems: NavItem[] = [
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>('chat');
-  const [version, setVersion] = useState('3.0.1');
+  const [version, setVersion] = useState('...');
   const [backend, setBackend] = useState<BackendState>({ connected: false, label: 'Checking' });
+  const [updateBanner, setUpdateBanner] = useState<{status: string; version?: string; percent?: number; speed?: string} | null>(null);
 
   useEffect(() => {
     const api = (window as any).electronAPI;
     api?.getAppVersion?.().then((v: string) => setVersion(v));
+
+    // Listen for update status changes
+    if (api?.onUpdateStatus) {
+      api.onUpdateStatus((data: any) => {
+        setUpdateBanner(data);
+        if (data.status === 'up-to-date' || data.status === 'dev-mode') {
+          setTimeout(() => setUpdateBanner(null), 3000);
+        }
+      });
+    }
 
     let cancelled = false;
     const check = async () => {
@@ -123,7 +134,35 @@ export default function App() {
           </div>
         </header>
 
-        <section className="flex-1 min-h-0 overflow-hidden">
+        {/* Update status banner */}
+        {updateBanner && updateBanner.status !== 'up-to-date' && updateBanner.status !== 'dev-mode' && updateBanner.status !== 'idle' && (
+          <div className={`px-6 py-2 text-sm flex items-center gap-3 ${
+            updateBanner.status === 'downloaded' ? 'bg-green-500/20 text-green-300 border-b border-green-500/30' :
+            updateBanner.status === 'downloading' ? 'bg-blue-500/20 text-blue-300 border-b border-blue-500/30' :
+            updateBanner.status === 'available' ? 'bg-yellow-500/20 text-yellow-300 border-b border-yellow-500/30' :
+            updateBanner.status === 'checking' ? 'bg-slate-800 text-slate-300 border-b border-slate-700' :
+            updateBanner.status === 'error' ? 'bg-red-500/20 text-red-300 border-b border-red-500/30' :
+            'bg-slate-800 text-slate-300 border-b border-slate-700'
+          }`}>
+            {updateBanner.status === 'checking' && 'Checking for updates...'}
+            {updateBanner.status === 'available' && `Update v${updateBanner.version} available!`}
+            {updateBanner.status === 'downloading' && `Downloading v${updateBanner.version}... ${updateBanner.percent || 0}%`}
+            {updateBanner.status === 'downloaded' && (
+              <>
+                Update v{updateBanner.version} ready!
+                <button
+                  onClick={() => (window as any).electronAPI?.installUpdateNow?.()}
+                  className="ml-2 px-3 py-0.5 bg-green-600 hover:bg-green-700 text-white rounded text-xs font-medium"
+                >
+                  Restart & Install
+                </button>
+              </>
+            )}
+            {updateBanner.status === 'error' && `Update error: ${updateBanner.version || 'unknown'}`}
+          </div>
+        )}
+
+        <section className="flex-1 min-h-0 overflow-auto">
           {renderPage()}
         </section>
       </main>

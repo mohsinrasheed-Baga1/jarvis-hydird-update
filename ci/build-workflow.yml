@@ -1,0 +1,74 @@
+# ============================================================
+# JARVIS Hybrid — GitHub Actions Build & Release Workflow
+# ============================================================
+# TO ACTIVATE: Move this file to .github/workflows/build.yml
+# Either via GitHub Web UI or with a token that has 'workflow' scope
+# ============================================================
+
+name: Build & Release JARVIS
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    strategy:
+      matrix:
+        node-version: [20]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: desktop-app/package-lock.json
+
+      - name: Install desktop-app dependencies
+        working-directory: desktop-app
+        run: npm ci
+
+      - name: Build React (Vite)
+        working-directory: desktop-app
+        run: npx vite build
+
+      - name: Build & Publish Electron (NSIS installer)
+        working-directory: desktop-app
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --win --x64 --publish always
+
+      - name: Verify release artifacts
+        working-directory: desktop-app
+        shell: pwsh
+        run: |
+          Write-Host "=== Checking Release Output ==="
+          if (Test-Path "release") {
+            $files = Get-ChildItem -Recurse release -File
+            Write-Host "Total files: $($files.Count)"
+            foreach ($f in $files) { Write-Host "  $($f.FullName) ($($f.Length) bytes)" }
+            $hasSetupExe = $files | Where-Object { $_.Name -match "Setup-.*\.exe$" }
+            $hasLatestYml = $files | Where-Object { $_.Name -eq "latest.yml" }
+            $hasBlockmap = $files | Where-Object { $_.Name -match "\.exe\.blockmap$" }
+            if ($hasSetupExe) { Write-Host "PASS: Setup EXE found" } else { Write-Host "FAIL: Setup EXE NOT found"; exit 1 }
+            if ($hasLatestYml) { Write-Host "PASS: latest.yml found" } else { Write-Host "FAIL: latest.yml NOT found"; exit 1 }
+            if ($hasBlockmap) { Write-Host "PASS: .blockmap found" } else { Write-Host "WARN: .blockmap not found" }
+            if ($hasLatestYml) { Write-Host "`n=== latest.yml ==="; Get-Content $hasLatestYml.FullName }
+          } else { Write-Host "FAIL: No release directory"; exit 1 }
+
+      - name: Upload artifacts (debug)
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-win-build
+          path: desktop-app/release/**/*
+          retention-days: 30

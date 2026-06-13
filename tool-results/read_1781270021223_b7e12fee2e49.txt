@@ -1,0 +1,1490 @@
+     1→     1→const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, dialog, shell, net, session } = require('electron');
+     2→     2→const path = require('path');
+     3→     3→const fs = require('fs');
+     4→     4→const { exec, spawn } = require('child_process');
+     5→     5→
+     6→     6→// ─── Load .env file for API keys ───
+     7→     7→// This allows users to set GROQ_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY etc. in a .env file
+     8→     8→try {
+     9→     9→  const envPaths = [
+    10→    10→    path.join(__dirname, '..', '.env'),
+    11→    11→    path.join(__dirname, '..', '..', '.env'),
+    12→    12→    path.join(process.cwd(), '.env'),
+    13→    13→  ];
+    14→    14→  for (const envPath of envPaths) {
+    15→    15→    if (fs.existsSync(envPath)) {
+    16→    16→      const envContent = fs.readFileSync(envPath, 'utf8');
+    17→    17→      for (const line of envContent.split('\n')) {
+    18→    18→        const trimmed = line.trim();
+    19→    19→        if (!trimmed || trimmed.startsWith('#')) continue;
+    20→    20→        const match = trimmed.match(/^([A-Z_]+)=(.*)$/);
+    21→    21→        if (match && !process.env[match[1]]) {
+    22→    22→          process.env[match[1]] = match[2].replace(/^["']|["']$/g, '');
+    23→    23→        }
+    24→    24→      }
+    25→    25→      break;
+    26→    26→    }
+    27→    27→  }
+    28→    28→} catch {}
+    29→    29→
+    30→    30→// ─── Configuration ───
+    31→    31→const CLOUD_APP_URL = 'http://127.0.0.1:3000';
+    32→    32→const VITE_DEV_URL = 'http://127.0.0.1:5173';
+    33→    33→const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
+    34→    34→// Dynamic version: read from package.json, never hardcode
+    35→    35→const APP_VERSION = app.getVersion ? app.getVersion() : (function() {
+    36→    36→  try {
+    37→    37→    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    38→    38→    return pkg.version || '2.4.0';
+    39→    39→  } catch { return '2.4.0'; }
+    40→    40→})();
+    41→    41→const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
+    42→    42→const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
+    43→    43→const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
+    44→    44→
+    45→    45→function isPipeClosedError(err) {
+    46→    46→  return err && (err.code === 'EPIPE' || String(err.message || '').includes('EPIPE'));
+    47→    47→}
+    48→    48→
+    49→    49→function ignoreClosedPipe(err) {
+    50→    50→  if (!isPipeClosedError(err)) {
+    51→    51→    try { fs.appendFileSync(path.join(app.getPath('userData'), 'jarvis-main.log'), `[pipe-error] ${err.message || err}\n`); } catch {}
+    52→    52→  }
+    53→    53→}
+    54→    54→
+    55→    55→try { process.stdout?.on?.('error', ignoreClosedPipe); } catch {}
+    56→    56→try { process.stderr?.on?.('error', ignoreClosedPipe); } catch {}
+    57→    57→
+    58→    58→// ─── Subprocess Management ───
+    59→    59→let cloudProcess = null;
+    60→    60→let pythonProcess = null;
+    61→    61→let cloudReady = false;
+    62→    62→let pythonReady = false;
+    63→    63→let cloudError = '';
+    64→    64→let pythonError = '';
+    65→    65→const MAX_STARTUP_WAIT = 30000; // 30 seconds
+    66→    66→
+    67→    67→function runCommand(command, args = [], options = {}) {
+    68→    68→  return new Promise((resolve) => {
+    69→    69→    const child = spawn(command, args, { shell: false, windowsHide: true, ...options });
+    70→    70→    let stdout = '';
+    71→    71→    let stderr = '';
+    72→    72→    child.stdout?.on('data', data => { stdout += data.toString(); });
+    73→    73→    child.stderr?.on('data', data => { stderr += data.toString(); });
+    74→    74→    child.on('error', err => resolve({ success: false, error: err.message, stdout, stderr }));
+    75→    75→    child.on('close', code => resolve({ success: code === 0, code, stdout, stderr, error: code === 0 ? '' : (stderr || `Exit code ${code}`) }));
+    76→    76→  });
+    77→    77→}
+    78→    78→
+    79→    79→function ps(script) {
+    80→    80→  return runCommand('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeout: 15000 });
+    81→    81→}
+    82→    82→
+    83→    83→function sendVolumeKey(keyCode, count = 1) {
+    84→    84→  const safeCount = Math.max(1, Math.min(20, Number(count) || 1));
+    85→    85→  return ps(`$wsh = New-Object -ComObject WScript.Shell; 1..${safeCount} | ForEach-Object { $wsh.SendKeys([char]${keyCode}); Start-Sleep -Milliseconds 35 }`);
+    86→    86→}
+    87→    87→
+    88→    88→function normalizeAppName(name = '') {
+    89→    89→  const value = String(name).toLowerCase().trim();
+    90→    90→  const apps = {
+    91→    91→    notepad: 'notepad.exe',
+    92→    92→    chrome: 'chrome.exe',
+    93→    93→    calculator: 'calc.exe',
+    94→    94→    calc: 'calc.exe',
+    95→    95→    paint: 'mspaint.exe',
+    96→    96→    wordpad: 'write.exe',
+    97→    97→    cmd: 'cmd.exe',
+    98→    98→    powershell: 'powershell.exe',
+    99→    99→  };
+   100→   100→  return apps[value] || name;
+   101→   101→}
+   102→   102→
+   103→   103→async function executeDesktopAction(action = {}) {
+   104→   104→  const type = action.type || action.action;
+   105→   105→  if (type === 'open-url' || type === 'open_url') {
+   106→   106→    await shell.openExternal(action.url);
+   107→   107→    return { success: true, message: 'Opened URL' };
+   108→   108→  }
+   109→   109→  if (type === 'search-google' || type === 'google_search') {
+   110→   110→    await shell.openExternal('https://www.google.com/search?q=' + encodeURIComponent(action.query || ''));
+   111→   111→    return { success: true, message: 'Google search opened' };
+   112→   112→  }
+   113→   113→  if (type === 'open-youtube' || type === 'play-youtube' || type === 'search-youtube' || type === 'youtube_search') {
+   114→   114→    const query = action.query || '';
+   115→   115→    const url = query
+   116→   116→      ? 'https://www.youtube.com/results?search_query=' + encodeURIComponent(query)
+   117→   117→      : 'https://www.youtube.com';
+   118→   118→    await shell.openExternal(url);
+   119→   119→    return { success: true, message: query ? 'YouTube search opened' : 'YouTube opened' };
+   120→   120→  }
+   121→   121→  if (type === 'open-app' || type === 'open_app') {
+   122→   122→    exec(process.platform === 'win32' ? `start "" "${normalizeAppName(action.app || action.name)}"` : `open -a "${action.app || action.name}"`);
+   123→   123→    return { success: true, message: `Opened ${action.app || action.name}` };
+   124→   124→  }
+   125→   125→  if (type === 'play-audio' || type === 'play_audio') {
+   126→   126→    // Open audio URL in default browser/player
+   127→   127→    const audioUrl = action.url || '';
+   128→   128→    if (audioUrl) {
+   129→   129→      await shell.openExternal(audioUrl);
+   130→   130→      return { success: true, message: 'Audio opened' };
+   131→   131→    }
+   132→   132→    // If no URL but has query, search on YouTube
+   133→   133→    if (action.query) {
+   134→   134→      const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(action.query);
+   135→   135→      await shell.openExternal(url);
+   136→   136→      return { success: true, message: 'Audio search opened on YouTube' };
+   137→   137→    }
+   138→   138→    return { success: false, message: 'No audio URL or query provided' };
+   139→   139→  }
+   140→   140→  if (type === 'open-whatsapp' || type === 'whatsapp') {
+   141→   141→    const phone = action.phone || action.number || '';
+   142→   142→    const message = action.message || action.text || '';
+   143→   143→    const url = phone
+   144→   144→      ? `https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}${message ? '&text=' + encodeURIComponent(message) : ''}`
+   145→   145→      : 'https://web.whatsapp.com';
+   146→   146→    await shell.openExternal(url);
+   147→   147→    return { success: true, message: phone ? 'WhatsApp chat opened' : 'WhatsApp Web opened' };
+   148→   148→  }
+   149→   149→  if (type === 'volume-up' || type === 'volume_up') {
+   150→   150→    if (process.platform === 'win32') return { ...(await sendVolumeKey(175, action.steps || 5)), message: 'Volume increased' };
+   151→   151→  }
+   152→   152→  if (type === 'volume-down' || type === 'volume_down') {
+   153→   153→    if (process.platform === 'win32') return { ...(await sendVolumeKey(174, action.steps || 5)), message: 'Volume decreased' };
+   154→   154→  }
+   155→   155→  if (type === 'mute-toggle' || type === 'mute_toggle' || type === 'mute' || type === 'unmute') {
+   156→   156→    if (process.platform === 'win32') return { ...(await sendVolumeKey(173, 1)), message: 'Mute toggled' };
+   157→   157→  }
+   158→   158→  if (type === 'screenshot') {
+   159→   159→    const file = action.path || path.join(app.getPath('pictures'), `jarvis-screenshot-${Date.now()}.png`);
+   160→   160→    const escaped = file.replace(/'/g, "''");
+   161→   161→    const result = await ps(`Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $bmp.Save('${escaped}', [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose(); Write-Output '${escaped}'`);
+   162→   162→    return { success: result.success, message: `Screenshot saved: ${file}`, path: file, error: result.error };
+   163→   163→  }
+   164→   164→  if (type === 'system-command') {
+   165→   165→    const allowed = new Set(['lock']);
+   166→   166→    if (!allowed.has(action.command)) return { success: false, message: 'Command not allowed from UI' };
+   167→   167→    if (process.platform === 'win32') exec('rundll32.exe user32.dll,LockWorkStation');
+   168→   168→    return { success: true, message: 'Command sent' };
+   169→   169→  }
+   170→   170→  return { success: false, message: 'Unknown desktop action' };
+   171→   171→}
+   172→   172→
+   173→   173→async function listenWithWindowsSpeech(language = 'en-US') {
+   174→   174→  if (process.platform !== 'win32') {
+   175→   175→    return { success: false, error: 'Windows Speech API is only available on Windows' };
+   176→   176→  }
+   177→   177→  const culture = String(language).startsWith('ur') ? 'ur-PK' : 'en-US';
+   178→   178→  const script = `
+   179→   179→Add-Type -AssemblyName System.Speech
+   180→   180→$culture = New-Object System.Globalization.CultureInfo('${culture}')
+   181→   181→$recognizer = New-Object System.Speech.Recognition.SpeechRecognitionEngine($culture)
+   182→   182→$recognizer.SetInputToDefaultAudioDevice()
+   183→   183→$dictation = New-Object System.Speech.Recognition.DictationGrammar
+   184→   184→$recognizer.LoadGrammar($dictation)
+   185→   185→$result = $recognizer.Recognize([TimeSpan]::FromSeconds(8))
+   186→   186→if ($result -and $result.Text) { Write-Output $result.Text }
+   187→   187→$recognizer.Dispose()
+   188→   188→`;
+   189→   189→  const result = await ps(script);
+   190→   190→  const text = (result.stdout || '').trim();
+   191→   191→  return text ? { success: true, text, method: 'windows-speech' } : { success: false, error: result.error || 'No speech recognized' };
+   192→   192→}
+   193→   193→
+   194→   194→// ─── Logging Setup ───
+   195→   195→const logDir = path.join(app.getPath('userData'), 'logs');
+   196→   196→try { fs.mkdirSync(logDir, { recursive: true }); } catch {}
+   197→   197→const logFile = path.join(logDir, 'jarvis-main.log');
+   198→   198→function writeConsoleLog(level, args) {
+   199→   199→  try {
+   200→   200→    fs.appendFileSync(logFile, `[console:${level}] ${args.map(formatLogArg).join(' ')}\n`);
+   201→   201→  } catch {}
+   202→   202→}
+   203→   203→
+   204→   204→console.log = (...args) => writeConsoleLog('log', args);
+   205→   205→console.warn = (...args) => writeConsoleLog('warn', args);
+   206→   206→console.error = (...args) => writeConsoleLog('error', args);
+   207→   207→
+   208→   208→function formatLogArg(arg) {
+   209→   209→  if (typeof arg === 'string') return arg;
+   210→   210→  if (arg instanceof Error) return arg.stack || arg.message;
+   211→   211→  try { return JSON.stringify(arg); } catch { return String(arg); }
+   212→   212→}
+   213→   213→
+   214→   214→function safeConsole(method, message) {
+   215→   215→  writeConsoleLog(method, [message]);
+   216→   216→}
+   217→   217→
+   218→   218→function log(level, ...args) {
+   219→   219→  const ts = new Date().toISOString();
+   220→   220→  const msg = `[${ts}] [${level}] ${args.map(formatLogArg).join(' ')}\n`;
+   221→   221→  try { fs.appendFileSync(logFile, msg); } catch {}
+   222→   222→  safeConsole(level === 'ERROR' ? 'error' : level === 'WARN' ? 'warn' : 'log', msg.trimEnd());
+   223→   223→}
+   224→   224→
+   225→   225→process.on('uncaughtException', (err) => {
+   226→   226→  if (isPipeClosedError(err)) {
+   227→   227→    log('WARN', 'Ignored closed pipe from detached launcher');
+   228→   228→    return;
+   229→   229→  }
+   230→   230→  log('ERROR', 'Uncaught exception:', err);
+   231→   231→  try { dialog.showErrorBox('JARVIS Error', err.message || String(err)); } catch {}
+   232→   232→});
+   233→   233→
+   234→   234→function attachProcessLogging(child, name, onStdout, onStderr) {
+   235→   235→  const attach = (stream, level, handler) => {
+   236→   236→    if (!stream || stream.destroyed || stream.readableEnded) return;
+   237→   237→    stream.on('data', (data) => {
+   238→   238→      try {
+   239→   239→        handler(data.toString());
+   240→   240→      } catch (err) {
+   241→   241→        if (!isPipeClosedError(err)) log('WARN', `[${name}] Stream handler failed:`, err.message);
+   242→   242→      }
+   243→   243→    });
+   244→   244→    stream.on('error', (err) => {
+   245→   245→      if (!isPipeClosedError(err)) log(level, `[${name}] Stream error:`, err.message);
+   246→   246→    });
+   247→   247→  };
+   248→   248→  attach(child?.stdout, 'WARN', onStdout);
+   249→   249→  attach(child?.stderr, 'WARN', onStderr);
+   250→   250→}
+   251→   251→log('INFO', '═══════════════════════════════════════');
+   252→   252→log('INFO', 'JARVIS Hybrid Desktop v' + APP_VERSION + ' starting...');
+   253→   253→log('INFO', 'Platform:', process.platform, 'Arch:', process.arch);
+   254→   254→
+   255→   255→// ─── Path Resolution ───
+   256→   256→function getProjectRoot() {
+   257→   257→  // In development: electron/main.js is inside desktop-app/
+   258→   258→  // In production: we're inside resources/app.asar
+   259→   259→  const devRoot = path.join(__dirname, '..', '..');
+   260→   260→  const prodRoot = path.join(process.resourcesPath, 'app');
+   261→   261→
+   262→   262→  if (fs.existsSync(path.join(devRoot, 'package.json'))) {
+   263→   263→    return devRoot;
+   264→   264→  }
+   265→   265→  return prodRoot;
+   266→   266→}
+   267→   267→
+   268→   268→function getPythonPath() {
+   269→   269→  const root = getProjectRoot();
+   270→   270→  const venvPython = path.join(root, '.venv', 'Scripts', 'python.exe');
+   271→   271→  const systemPython = 'python';
+   272→   272→
+   273→   273→  if (fs.existsSync(venvPython)) {
+   274→   274→    return venvPython;
+   275→   275→  }
+   276→   276→  return systemPython;
+   277→   277→}
+   278→   278→
+   279→   279→// ─── Subprocess Launchers ───
+   280→   280→async function launchCloudBackend() {
+   281→   281→  return new Promise(async (resolve, reject) => {
+   282→   282→    log('INFO', '[Launcher] Starting cloud backend...');
+   283→   283→
+   284→   284→    const root = getProjectRoot();
+   285→   285→    const isWindows = process.platform === 'win32';
+   286→   286→
+   287→   287→    // Check if npm is available
+   288→   288→    const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+   289→   289→
+   290→   290→    try {
+   291→   291→      if (await checkCloudHealth()) {
+   292→   292→        cloudReady = true;
+   293→   293→        cloudError = '';
+   294→   294→        log('INFO', '[Launcher] Existing cloud backend detected');
+   295→   295→        resolve(true);
+   296→   296→        return;
+   297→   297→      }
+   298→   298→
+   299→   299→      cloudProcess = spawn(npmCmd, ['run', 'dev', '--', '--hostname', '127.0.0.1', '--port', '3000'], {
+   300→   300→        cwd: root,
+   301→   301→        shell: true,
+   302→   302→        stdio: ['ignore', 'pipe', 'pipe'],
+   303→   303→      });
+   304→   304→
+   305→   305→      attachProcessLogging(cloudProcess, 'Cloud', (output) => {
+   306→   306→        log('INFO', '[Cloud]', output.trim());
+   307→   307→
+   308→   308→        // Check for ready signal
+   309→   309→        if (output.includes('ready') || output.includes('started server') || output.includes('Local:')) {
+   310→   310→          waitForCloud().then((ready) => {
+   311→   311→            cloudReady = ready;
+   312→   312→            cloudError = ready ? '' : 'Next.js started, but /api/health did not answer on http://127.0.0.1:3000';
+   313→   313→            log(ready ? 'INFO' : 'WARN', '[Launcher]', ready ? 'Cloud backend ready' : cloudError);
+   314→   314→            resolve(ready);
+   315→   315→          });
+   316→   316→        }
+   317→   317→      }, (output) => {
+   318→   318→        output = output.trim();
+   319→   319→        if (output) cloudError = output.split(/\r?\n/).slice(-1)[0];
+   320→   320→        log('WARN', '[Cloud]', output);
+   321→   321→      });
+   322→   322→
+   323→   323→      cloudProcess.on('error', (err) => {
+   324→   324→        cloudError = err.message;
+   325→   325→        log('ERROR', '[Cloud] Process error:', err.message);
+   326→   326→        reject(err);
+   327→   327→      });
+   328→   328→
+   329→   329→      cloudProcess.on('close', (code) => {
+   330→   330→        log('INFO', '[Cloud] Process exited with code:', code);
+   331→   331→        cloudReady = false;
+   332→   332→        if (code !== 0 && code !== null) cloudError = `Next.js process exited with code ${code}`;
+   333→   333→      });
+   334→   334→
+   335→   335→      // Timeout fallback
+   336→   336→      setTimeout(() => {
+   337→   337→        if (!cloudReady) {
+   338→   338→          cloudError = cloudError || 'Next.js startup timed out on http://127.0.0.1:3000';
+   339→   339→          log('WARN', '[Launcher]', cloudError);
+   340→   340→          resolve(false);
+   341→   341→        }
+   342→   342→      }, MAX_STARTUP_WAIT);
+   343→   343→
+   344→   344→    } catch (err) {
+   345→   345→      cloudError = err.message;
+   346→   346→      log('ERROR', '[Launcher] Failed to start cloud:', err.message);
+   347→   347→      reject(err);
+   348→   348→    }
+   349→   349→  });
+   350→   350→}
+   351→   351→
+   352→   352→async function launchPythonAgent() {
+   353→   353→  return new Promise((resolve, reject) => {
+   354→   354→    log('INFO', '[Launcher] Starting Python desktop agent...');
+   355→   355→
+   356→   356→    const root = getProjectRoot();
+   357→   357→    const pythonPath = getPythonPath();
+   358→   358→    const desktopPath = path.join(root, 'desktop');
+   359→   359→
+   360→   360→    try {
+   361→   361→      const args = [
+   362→   362→        '-m', 'jarvis.main',
+   363→   363→        '--cloud-url', CLOUD_APP_URL,
+   364→   364→        '--no-voice',
+   365→   365→        '--background',
+   366→   366→      ];
+   367→   367→
+   368→   368→      pythonProcess = spawn(pythonPath, args, {
+   369→   369→        cwd: desktopPath,
+   370→   370→        shell: true,
+   371→   371→        stdio: ['ignore', 'pipe', 'pipe'],
+   372→   372→      });
+   373→   373→
+   374→   374→      attachProcessLogging(pythonProcess, 'Python', (output) => {
+   375→   375→        log('INFO', '[Python]', output.trim());
+   376→   376→
+   377→   377→        // Check for ready signal
+   378→   378→        if (output.includes('Ready') || output.includes('started') || output.includes('Online')) {
+   379→   379→          pythonReady = true;
+   380→   380→          log('INFO', '[Launcher] ✅ Python agent ready');
+   381→   381→          resolve(true);
+   382→   382→        }
+   383→   383→      }, (output) => {
+   384→   384→        output = output.trim();
+   385→   385→        if (output) pythonError = output.split(/\r?\n/).slice(-1)[0];
+   386→   386→        log('WARN', '[Python]', output);
+   387→   387→      });
+   388→   388→
+   389→   389→      pythonProcess.on('error', (err) => {
+   390→   390→        pythonError = err.message;
+   391→   391→        log('ERROR', '[Python] Process error:', err.message);
+   392→   392→        reject(err);
+   393→   393→      });
+   394→   394→
+   395→   395→      pythonProcess.on('close', (code) => {
+   396→   396→        log('INFO', '[Python] Process exited with code:', code);
+   397→   397→        pythonReady = false;
+   398→   398→        if (code !== 0 && code !== null) pythonError = `Python agent exited with code ${code}`;
+   399→   399→      });
+   400→   400→
+   401→   401→      // Timeout fallback
+   402→   402→      setTimeout(() => {
+   403→   403→        if (!pythonReady) {
+   404→   404→          pythonError = pythonError || 'Python agent startup timed out';
+   405→   405→          log('WARN', '[Launcher]', pythonError);
+   406→   406→          resolve(false);
+   407→   407→        }
+   408→   408→      }, MAX_STARTUP_WAIT);
+   409→   409→
+   410→   410→    } catch (err) {
+   411→   411→      pythonError = err.message;
+   412→   412→      log('ERROR', '[Launcher] Failed to start Python:', err.message);
+   413→   413→      reject(err);
+   414→   414→    }
+   415→   415→  });
+   416→   416→}
+   417→   417→
+   418→   418→async function checkCloudHealth() {
+   419→   419→  return new Promise((resolve) => {
+   420→   420→  const request = net.request(CLOUD_APP_URL + '/api/health');
+   421→   421→    request.on('response', (response) => {
+   422→   422→      resolve(response.statusCode === 200);
+   423→   423→    });
+   424→   424→    request.on('error', () => resolve(false));
+   425→   425→    request.end();
+   426→   426→  });
+   427→   427→}
+   428→   428→
+   429→   429→async function waitForCloud() {
+   430→   430→  log('INFO', '[Launcher] Waiting for cloud to be ready...');
+   431→   431→
+   432→   432→  const maxAttempts = 30;
+   433→   433→  for (let i = 0; i < maxAttempts; i++) {
+   434→   434→    const healthy = await checkCloudHealth();
+   435→   435→    if (healthy) {
+   436→   436→      log('INFO', '[Launcher] ✅ Cloud health check passed');
+   437→   437→      return true;
+   438→   438→    }
+   439→   439→    await new Promise(r => setTimeout(r, 1000));
+   440→   440→  }
+   441→   441→
+   442→   442→  log('WARN', '[Launcher] Cloud health check timed out');
+   443→   443→  return false;
+   444→   444→}
+   445→   445→
+   446→   446→function cleanupProcesses() {
+   447→   447→  log('INFO', '[Launcher] Cleaning up subprocesses...');
+   448→   448→
+   449→   449→  if (cloudProcess) {
+   450→   450→    try {
+   451→   451→      cloudProcess.kill();
+   452→   452→      log('INFO', '[Launcher] Cloud process killed');
+   453→   453→    } catch (err) {
+   454→   454→      log('WARN', '[Launcher] Failed to kill cloud:', err.message);
+   455→   455→    }
+   456→   456→  }
+   457→   457→
+   458→   458→  if (pythonProcess) {
+   459→   459→    try {
+   460→   460→      pythonProcess.kill();
+   461→   461→      log('INFO', '[Launcher] Python process killed');
+   462→   462→    } catch (err) {
+   463→   463→      log('WARN', '[Launcher] Failed to kill Python:', err.message);
+   464→   464→    }
+   465→   465→  }
+   466→   466→}
+   467→   467→
+   468→   468→// ─── Auto-Updater (Complete Production System) ───
+   469→   469→let autoUpdater = null;
+   470→   470→let updaterState = {
+   471→   471→  status: 'idle',          // idle | checking | available | downloading | downloaded | up-to-date | error | dev-mode
+   472→   472→  latestVersion: null,
+   473→   473→  downloadProgress: null,   // { percent, bytesPerSecond, transferred, total }
+   474→   474→  lastChecked: null,
+   475→   475→  lastError: null,
+   476→   476→  updateInfo: null,
+   477→   477→  ghTokenLoaded: false,
+   478→   478→  feedUrlConfigured: false,
+   479→   479→};
+   480→   480→const updaterLogEntries = [];
+   481→   481→const MAX_UPDATER_LOG = 200;
+   482→   482→
+   483→   483→function updaterLog(level, ...args) {
+   484→   484→  const ts = new Date().toISOString();
+   485→   485→  const entry = `[${ts}] [${level}] ${args.map(formatLogArg).join(' ')}`;
+   486→   486→  updaterLogEntries.push(entry);
+   487→   487→  if (updaterLogEntries.length > MAX_UPDATER_LOG) updaterLogEntries.shift();
+   488→   488→  log(level === 'ERROR' ? 'ERROR' : level === 'WARN' ? 'WARN' : 'INFO', '[Updater]', ...args);
+   489→   489→}
+   490→   490→
+   491→   491→// ─── Private Repo Token Handling ───
+   492→   492→// Load GitHub token from safe locations (NOT hardcoded in source)
+   493→   493→function loadGHToken() {
+   494→   494→  // Try multiple safe locations
+   495→   495→  const tokenLocations = [
+   496→   496→    // 1. Environment variable (set by CI or user)
+   497→   497→    process.env.GH_TOKEN,
+   498→   498→    process.env.GITHUB_TOKEN,
+   499→   499→    // 2. Config in userData (safe, user-specific)
+   500→   500→    path.join(app.getPath('userData'), 'gh-token.json'),
+   501→   501→    // 3. Config in electron folder (build-time injection)
+   502→   502→    path.join(__dirname, 'config.json'),
+   503→   503→    // 4. Config in resources (build-time injection)
+   504→   504→    path.join(process.resourcesPath, 'config.json'),
+   505→   505→  ];
+   506→   506→
+   507→   507→  for (const loc of tokenLocations) {
+   508→   508→    if (!loc) continue;
+   509→   509→    // If it's a direct env var value
+   510→   510→    if (typeof loc === 'string' && (loc.startsWith('ghp_') || loc.startsWith('github_pat_'))) {
+   511→   511→      updaterLog('INFO', 'GH_TOKEN loaded from environment variable');
+   512→   512→      updaterState.ghTokenLoaded = true;
+   513→   513→      return loc;
+   514→   514→    }
+   515→   515→    // If it's a file path, try reading it
+   516→   516→    try {
+   517→   517→      if (fs.existsSync(loc)) {
+   518→   518→        const data = JSON.parse(fs.readFileSync(loc, 'utf8'));
+   519→   519→        if (data.ghToken || data.GH_TOKEN) {
+   520→   520→          updaterLog('INFO', 'GH_TOKEN loaded from file:', path.basename(loc));
+   521→   521→          updaterState.ghTokenLoaded = true;
+   522→   522→          return data.ghToken || data.GH_TOKEN;
+   523→   523→        }
+   524→   524→      }
+   525→   525→    } catch {}
+   526→   526→  }
+   527→   527→
+   528→   528→  updaterLog('WARN', 'No GH_TOKEN found in any safe location');
+   529→   529→  updaterState.ghTokenLoaded = false;
+   530→   530→  return null;
+   531→   531→}
+   532→   532→
+   533→   533→try {
+   534→   534→  const { autoUpdater: au } = require('electron-updater');
+   535→   535→  autoUpdater = au;
+   536→   536→
+   537→   537→  // Load private repo token
+   538→   538→  const ghToken = loadGHToken();
+   539→   539→  if (ghToken && autoUpdater) {
+   540→   540→    // For private repos, set the token in the request headers
+   541→   541→    autoUpdater.requestHeaders = {
+   542→   542→      Authorization: `token ${ghToken}`,
+   543→   543→    };
+   544→   544→    updaterLog('INFO', 'Private repo token configured for updater');
+   545→   545→  }
+   546→   546→
+   547→   547→  autoUpdater.autoDownload = true;
+   548→   548→  autoUpdater.autoInstallOnAppQuit = true;
+   549→   549→
+   550→   550→  // Configure feed URL for private repo
+   551→   551→  const repoConfig = {
+   552→   552→    owner: 'mohsinrasheed-Baga1',
+   553→   553→    repo: 'jarvis-hydird-update',
+   554→   554→  };
+   555→   555→
+   556→   556→  // Set up dynamic feed URL with token for private repos
+   557→   557→  if (ghToken) {
+   558→   558→    autoUpdater.setFeedURL({
+   559→   559→      provider: 'github',
+   560→   560→      owner: repoConfig.owner,
+   561→   561→      repo: repoConfig.repo,
+   562→   562→      token: ghToken,
+   563→   563→      releaseType: 'release',
+   564→   564→      private: true,
+   565→   565→    });
+   566→   566→    updaterState.feedUrlConfigured = true;
+   567→   567→    updaterLog('INFO', 'Feed URL configured for private repo with token');
+   568→   568→  } else {
+   569→   569→    // Public repo - electron-updater reads from package.json build.publish
+   570→   570→    updaterState.feedUrlConfigured = true;
+   571→   571→    updaterLog('INFO', 'Feed URL using package.json publish config');
+   572→   572→  }
+   573→   573→
+   574→   574→  autoUpdater.logger = {
+   575→   575→    info: (...a) => updaterLog('INFO', ...a),
+   576→   576→    error: (...a) => updaterLog('ERROR', ...a),
+   577→   577→    warn: (...a) => updaterLog('WARN', ...a),
+   578→   578→  };
+   579→   579→
+   580→   580→  updaterLog('INFO', 'electron-updater loaded successfully');
+   581→   581→  updaterLog('INFO', 'Current version:', APP_VERSION);
+   582→   582→  updaterLog('INFO', 'App packaged:', app.isPackaged);
+   583→   583→  updaterLog('INFO', 'Feed URL configured:', updaterState.feedUrlConfigured);
+   584→   584→  updaterLog('INFO', 'GH token loaded:', updaterState.ghTokenLoaded);
+   585→   585→} catch (err) {
+   586→   586→  updaterLog('ERROR', 'electron-updater not available:', err.message);
+   587→   587→}
+   588→   588→
+   589→   589→function sendUpdateStatus(data = {}) {
+   590→   590→  if (mainWindow && !mainWindow.isDestroyed()) {
+   591→   591→    mainWindow.webContents.send('update-status', { ...data, currentVersion: APP_VERSION });
+   592→   592→  }
+   593→   593→}
+   594→   594→
+   595→   595→function getUpdateDiagnostics() {
+   596→   596→  return {
+   597→   597→    currentVersion: APP_VERSION,
+   598→   598→    latestVersion: updaterState.latestVersion,
+   599→   599→    status: updaterState.status,
+   600→   600→    lastChecked: updaterState.lastChecked,
+   601→   601→    downloadProgress: updaterState.downloadProgress,
+   602→   602→    ghTokenLoaded: updaterState.ghTokenLoaded,
+   603→   603→    feedUrlConfigured: updaterState.feedUrlConfigured,
+   604→   604→    lastError: updaterState.lastError,
+   605→   605→    logPath: logFile,
+   606→   606→    appPackaged: app.isPackaged,
+   607→   607→    platform: process.platform,
+   608→   608→    arch: process.arch,
+   609→   609→  };
+   610→   610→}
+   611→   611→
+   612→   612→// ─── Check for updates ───
+   613→   613→function checkForUpdates() {
+   614→   614→  if (!app.isPackaged) {
+   615→   615→    updaterLog('INFO', 'Skipping update check (dev mode / not packaged)');
+   616→   616→    updaterState.status = 'dev-mode';
+   617→   617→    sendUpdateStatus({ status: 'dev-mode' });
+   618→   618→    return;
+   619→   619→  }
+   620→   620→  if (!autoUpdater) {
+   621→   621→    updaterLog('WARN', 'Auto-updater not available');
+   622→   622→    updaterState.status = 'error';
+   623→   623→    updaterState.lastError = 'Auto-updater not available';
+   624→   624→    sendUpdateStatus({ status: 'error', message: 'Auto-updater not available' });
+   625→   625→    return;
+   626→   626→  }
+   627→   627→  updaterLog('INFO', 'Checking for updates...');
+   628→   628→  updaterState.status = 'checking';
+   629→   629→  updaterState.lastError = null;
+   630→   630→  sendUpdateStatus({ status: 'checking' });
+   631→   631→
+   632→   632→  autoUpdater.checkForUpdates().then(result => {
+   633→   633→    updaterState.lastChecked = new Date().toISOString();
+   634→   634→    if (result) {
+   635→   635→      updaterLog('INFO', 'Update check result - current:', APP_VERSION, 'latest:', result.updateInfo?.version);
+   636→   636→    }
+   637→   637→  }).catch(err => {
+   638→   638→    updaterLog('ERROR', 'Update check failed:', err.message);
+   639→   639→    updaterState.status = 'error';
+   640→   640→    updaterState.lastError = err.message;
+   641→   641→    sendUpdateStatus({ status: 'error', message: err.message });
+   642→   642→  });
+   643→   643→}
+   644→   644→
+   645→   645→// ─── Auto-updater event handlers ───
+   646→   646→if (autoUpdater) {
+   647→   647→  autoUpdater.on('checking-for-update', () => {
+   648→   648→    updaterLog('INFO', 'Checking for update...');
+   649→   649→    updaterState.status = 'checking';
+   650→   650→    sendUpdateStatus({ status: 'checking' });
+   651→   651→  });
+   652→   652→
+   653→   653→  autoUpdater.on('update-available', (info) => {
+   654→   654→    updaterLog('INFO', 'Update available:', info.version, 'releaseDate:', info.releaseDate);
+   655→   655→
+   656→   656→    // ─── Version Guard ───
+   657→   657→    // NEVER allow downloading older or same version
+   658→   658→    const currentVer = APP_VERSION;
+   659→   659→    const latestVer = info.version;
+   660→   660→    const isOlderOrSame = semverCompare(latestVer, currentVer) <= 0;
+   661→   661→    if (isOlderOrSame) {
+   662→   662→      updaterLog('WARN', 'Older or same version ignored. Current:', currentVer, 'Found:', latestVer);
+   663→   663→      updaterState.status = 'up-to-date';
+   664→   664→      updaterState.lastChecked = new Date().toISOString();
+   665→   665→      updaterState.latestVersion = currentVer;
+   666→   666→      sendUpdateStatus({ status: 'up-to-date', version: currentVer, message: 'Older or same version ignored' });
+   667→   667→      return;
+   668→   668→    }
+   669→   669→
+   670→   670→    updaterState.status = 'available';
+   671→   671→    updaterState.latestVersion = info.version;
+   672→   672→    updaterState.updateInfo = info;
+   673→   673→    sendUpdateStatus({ status: 'available', version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes });
+   674→   674→  });
+   675→   675→
+   676→   676→  autoUpdater.on('update-not-available', (info) => {
+   677→   677→    updaterLog('INFO', 'Update not available. Current version is latest:', APP_VERSION);
+   678→   678→    updaterState.status = 'up-to-date';
+   679→   679→    updaterState.lastChecked = new Date().toISOString();
+   680→   680→    sendUpdateStatus({ status: 'up-to-date', version: APP_VERSION });
+   681→   681→  });
+   682→   682→
+   683→   683→  autoUpdater.on('download-progress', (progressObj) => {
+   684→   684→    const progress = {
+   685→   685→      percent: Math.round(progressObj.percent),
+   686→   686→      bytesPerSecond: progressObj.bytesPerSecond,
+   687→   687→      transferred: progressObj.transferred,
+   688→   688→      total: progressObj.total,
+   689→   689→      speed: Math.round(progressObj.bytesPerSecond / 1024) + ' KB/s',
+   690→   690→    };
+   691→   691→    updaterState.status = 'downloading';
+   692→   692→    updaterState.downloadProgress = progress;
+   693→   693→    // Only log every 10% to avoid log spam
+   694→   694→    if (progress.percent % 10 === 0 || progress.percent >= 95) {
+   695→   695→      updaterLog('INFO', `Download progress: ${progress.percent}% (${progress.speed})`);
+   696→   696→    }
+   697→   697→    sendUpdateStatus({ status: 'downloading', percent: progress.percent, speed: progress.speed, transferred: progress.transferred, total: progress.total });
+   698→   698→  });
+   699→   699→
+   700→   700→  autoUpdater.on('update-downloaded', (info) => {
+   701→   701→    updaterLog('INFO', 'Update downloaded successfully:', info.version);
+   702→   702→    updaterLog('INFO', 'Update will install on app quit, or user can trigger restart');
+   703→   703→    updaterState.status = 'downloaded';
+   704→   704→    updaterState.latestVersion = info.version;
+   705→   705→    updateDownloaded = true;
+   706→   706→    sendUpdateStatus({ status: 'downloaded', version: info.version });
+   707→   707→    try {
+   708→   708→      if (Notification.isSupported()) {
+   709→   709→        const n = new Notification({
+   710→   710→          title: 'JARVIS Update Ready',
+   711→   711→          body: `v${info.version} downloaded. Restart to install.`,
+   712→   712→          icon: getIconPath()
+   713→   713→        });
+   714→   714→        n.show();
+   715→   715→        n.on('click', () => { installUpdateNow(); });
+   716→   716→      }
+   717→   717→    } catch {}
+   718→   718→  });
+   719→   719→
+   720→   720→  autoUpdater.on('error', (err) => {
+   721→   721→    updaterLog('ERROR', 'Auto-updater error:', err.message);
+   722→   722→    updaterLog('ERROR', 'Error code:', err.code || 'No error code');
+   723→   723→    updaterLog('ERROR', 'Error stack:', err.stack || 'No stack trace');
+   724→   724→    // Log the cause if available
+   725→   725→    if (err.cause) {
+   726→   726→      updaterLog('ERROR', 'Error cause:', String(err.cause));
+   727→   727→    }
+   728→   728→    updaterState.status = 'error';
+   729→   729→    updaterState.lastError = err.message;
+   730→   730→    sendUpdateStatus({ status: 'error', message: err.message });
+   731→   731→  });
+   732→   732→}
+   733→   733→
+   734→   734→// ─── Version Guard Utility ───
+   735→   735→function semverCompare(a, b) {
+   736→   736→  const pa = String(a).replace(/^v/, '').split('.').map(Number);
+   737→   737→  const pb = String(b).replace(/^v/, '').split('.').map(Number);
+   738→   738→  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+   739→   739→    const na = pa[i] || 0;
+   740→   740→    const nb = pb[i] || 0;
+   741→   741→    if (na > nb) return 1;
+   742→   742→    if (na < nb) return -1;
+   743→   743→  }
+   744→   744→  return 0;
+   745→   745→}
+   746→   746→
+   747→   747→// ─── Install update now ───
+   748→   748→function installUpdateNow() {
+   749→   749→  if (!autoUpdater || !updateDownloaded) {
+   750→   750→    updaterLog('WARN', 'Cannot install: no update downloaded');
+   751→   751→    return;
+   752→   752→  }
+   753→   753→  updaterLog('INFO', 'Installing update and restarting...');
+   754→   754→  isQuitting = true;
+   755→   755→  autoUpdater.quitAndInstall(false, true);
+   756→   756→}
+   757→   757→
+   758→   758→// ─── Periodic update check ───
+   759→   759→let periodicUpdateTimer = null;
+   760→   760→function startPeriodicUpdateCheck() {
+   761→   761→  if (periodicUpdateTimer) clearInterval(periodicUpdateTimer);
+   762→   762→  periodicUpdateTimer = setInterval(() => {
+   763→   763→    if (app.isPackaged && autoUpdater) {
+   764→   764→      updaterLog('INFO', 'Periodic update check triggered');
+   765→   765→      checkForUpdates();
+   766→   766→    }
+   767→   767→  }, VERSION_CHECK_INTERVAL);
+   768→   768→}
+   769→   769→
+   770→   770→// ─── State ───
+   771→   771→let mainWindow = null;
+   772→   772→let tray = null;
+   773→   773→let isQuitting = false;
+   774→   774→let trayCreated = false;
+   775→   775→let loadFailed = false;
+   776→   776→let lastWebVersion = null;
+   777→   777→let updateDownloaded = false;
+   778→   778→
+   779→   779→// ─── Icon Path Resolution ───
+   780→   780→function getIconPath() {
+   781→   781→  const candidates = [
+   782→   782→    path.join(process.resourcesPath, 'app.asar', 'assets', 'icon.png'),
+   783→   783→    path.join(__dirname, '..', 'assets', 'icon.png'),
+   784→   784→    path.join(__dirname, 'assets', 'icon.png'),
+   785→   785→    path.join(process.resourcesPath, 'assets', 'icon.png'),
+   786→   786→  ];
+   787→   787→  for (const p of candidates) {
+   788→   788→    try { if (fs.existsSync(p)) { log('INFO', 'Icon found:', p); return p; } } catch {}
+   789→   789→  }
+   790→   790→  log('WARN', 'No icon.png found');
+   791→   791→  return undefined;
+   792→   792→}
+   793→   793→
+   794→   794→function isOnline() { return net.isOnline(); }
+   795→   795→
+   796→   796→async function clearBrowserCache() {
+   797→   797→  try {
+   798→   798→    if (mainWindow && !mainWindow.isDestroyed()) {
+   799→   799→      const ses = mainWindow.webContents.session;
+   800→   800→      await ses.clearCache();
+   801→   801→      await ses.clearStorageData({ storages: ['cache', 'serviceworker', 'shadercache'] });
+   802→   802→      log('INFO', 'Browser cache cleared');
+   803→   803→    }
+   804→   804→  } catch (err) { log('WARN', 'Failed to clear cache:', err.message); }
+   805→   805→}
+   806→   806→
+   807→   807→// ─── Create Window ───
+   808→   808→function createWindow() {
+   809→   809→  log('INFO', 'Creating main window...');
+   810→   810→  const iconPath = getIconPath();
+   811→   811→  const windowOptions = {
+   812→   812→    width: 1400, height: 900, minWidth: 1000, minHeight: 700,
+   813→   813→    backgroundColor: '#0a0a0f', show: false,
+   814→   814→    webPreferences: {
+   815→   815→      nodeIntegration: false,
+   816→   816→      contextIsolation: true,
+   817→   817→      preload: path.join(__dirname, 'preload.js'),
+   818→   818→      sandbox: false,
+   819→   819→      webSecurity: true,
+   820→   820→      partition: 'persist:jarvis',
+   821→   821→    },
+   822→   822→  };
+   823→   823→  if (iconPath) windowOptions.icon = iconPath;
+   824→   824→
+   825→   825→  if (process.platform === 'win32') {
+   826→   826→    try {
+   827→   827→      const winVer = parseFloat(require('os').release());
+   828→   828→      if (winVer >= 10) {
+   829→   829→        windowOptions.frame = true;
+   830→   830→        windowOptions.titleBarStyle = 'hidden';
+   831→   831→        windowOptions.titleBarOverlay = { color: '#0a0a0f', symbolColor: '#a29bfe', height: 36 };
+   832→   832→      } else { windowOptions.frame = false; }
+   833→   833→    } catch { windowOptions.frame = false; }
+   834→   834→  } else if (process.platform === 'darwin') {
+   835→   835→    windowOptions.titleBarStyle = 'hiddenInset'; windowOptions.frame = true;
+   836→   836→  } else { windowOptions.frame = false; }
+   837→   837→
+   838→   838→  try { mainWindow = new BrowserWindow(windowOptions); } catch (err) {
+   839→   839→    log('ERROR', 'Failed to create BrowserWindow:', err.message);
+   840→   840→    try {
+   841→   841→      mainWindow = new BrowserWindow({ width: 1200, height: 800, show: false,
+   842→   842→        webPreferences: { nodeIntegration: false, contextIsolation: true, preload: path.join(__dirname, 'preload.js') } });
+   843→   843→    } catch (err2) { dialog.showErrorBox('JARVIS Error', 'Could not create window: ' + err2.message); app.quit(); return; }
+   844→   844→  }
+   845→   845→
+   846→   846→  // Grant microphone permission
+   847→   847→  mainWindow.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
+   848→   848→    const allowed = ['media', 'clipboard-read', 'clipboard-write', 'display-capture'];
+   849→   849→    callback(allowed.includes(permission));
+   850→   850→  });
+   851→   851→  mainWindow.webContents.session.setPermissionCheckHandler((webContents, permission) => {
+   852→   852→    return ['media', 'clipboard-read', 'clipboard-write', 'display-capture'].includes(permission);
+   853→   853→  });
+   854→   854→
+   855→   855→  loadWebApp();
+   856→   856→
+   857→   857→  mainWindow.once('ready-to-show', () => { mainWindow.show(); mainWindow.focus(); });
+   858→   858→  setTimeout(() => { if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) { mainWindow.show(); mainWindow.focus(); } }, 5000);
+   859→   859→
+   860→   860→  mainWindow.webContents.on('did-finish-load', () => {
+   861→   861→    log('INFO', 'Page loaded successfully');
+   862→   862→    loadFailed = false;
+   863→   863→    mainWindow.webContents.executeJavaScript(`
+   864→   864→      if (window.electronAPI) {
+   865→   865→        window.__JARVIS_DESKTOP__ = true;
+   866→   866→        window.__JARVIS_VERSION__ = '${APP_VERSION}';
+   867→   867→        window.__JARVIS_PLATFORM__ = '${process.platform}';
+   868→   868→      }
+   869→   869→    `).catch(() => {});
+   870→   870→  });
+   871→   871→  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDesc) => {
+   872→   872→    log('ERROR', 'Failed to load:', errorCode, errorDesc);
+   873→   873→    loadFailed = true;
+   874→   874→    showOfflinePage(errorDesc);
+   875→   875→  });
+   876→   876→  mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+   877→   877→
+   878→   878→  mainWindow.webContents.on('before-input-event', (event, input) => {
+   879→   879→    if (input.control && input.shift && input.key.toLowerCase() === 'r') { event.preventDefault(); hardRefresh(); }
+   880→   880→    if (input.control && input.shift && input.key.toLowerCase() === 'd') { event.preventDefault(); mainWindow.webContents.toggleDevTools(); }
+   881→   881→    if (input.control && input.shift && input.key.toLowerCase() === 'u') { event.preventDefault(); checkForUpdates(); }
+   882→   882→  });
+   883→   883→
+   884→   884→  mainWindow.on('close', (e) => {
+   885→   885→    if (!isQuitting) { e.preventDefault(); if (trayCreated) mainWindow.hide(); else mainWindow.minimize(); }
+   886→   886→  });
+   887→   887→  mainWindow.on('closed', () => { mainWindow = null; });
+   888→   888→}
+   889→   889→
+   890→   890→function loadWebApp() {
+   891→   891→  if (!mainWindow || mainWindow.isDestroyed()) return;
+   892→   892→
+   893→   893→  const appUrl = app.isPackaged || LOAD_DIST_UI
+   894→   894→    ? 'file://' + path.join(__dirname, '..', 'dist', 'index.html')
+   895→   895→    : VITE_DEV_URL;
+   896→   896→  log('INFO', 'Loading UI:', appUrl);
+   897→   897→
+   898→   898→  if (app.isPackaged || isOnline()) {
+   899→   899→    mainWindow.loadURL(appUrl, {
+   900→   900→      userAgent: 'JARVIS-Hybrid-Desktop/' + APP_VERSION + ' (' + process.platform + ')',
+   901→   901→      extraHeaders: 'Cache-Control: no-cache\nPragma: no-cache\n',
+   902→   902→    }).catch(err => {
+   903→   903→      log('ERROR', 'Failed to load modern UI:', err.message);
+   904→   904→      if (isOnline()) {
+   905→   905→        mainWindow.loadURL(REMOTE_FALLBACK_URL).catch(() => showOfflinePage('Connection failed'));
+   906→   906→      } else {
+   907→   907→        showOfflinePage('Connection failed');
+   908→   908→      }
+   909→   909→    });
+   910→   910→  } else { showOfflinePage('No internet connection'); }
+   911→   911→}
+   912→   912→
+   913→   913→async function hardRefresh() {
+   914→   914→  await clearBrowserCache();
+   915→   915→  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reloadIgnoringCache();
+   916→   916→}
+   917→   917→
+   918→   918→function showOfflinePage(reason) {
+   919→   919→  if (!mainWindow || mainWindow.isDestroyed()) return;
+   920→   920→  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>JARVIS - Offline</title>
+   921→   921→  <style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0a0a0f;color:#e2e8f0;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh}
+   922→   922→  .c{text-align:center;max-width:500px;padding:40px}.logo{width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,#6c5ce7,#00cec9);display:flex;align-items:center;justify-content:center;margin:0 auto 24px;font-size:36px;box-shadow:0 0 30px rgba(108,92,231,0.4)}
+   923→   923→  h1{font-size:28px;margin-bottom:12px;color:#a29bfe}p{color:#8a8a9a;font-size:16px;margin-bottom:24px}
+   924→   924→  .btn{background:linear-gradient(135deg,#6c5ce7,#a29bfe);color:#fff;border:none;padding:14px 32px;border-radius:12px;font-size:16px;cursor:pointer;font-weight:600}
+   925→   925→  .btn:hover{transform:translateY(-2px)}</style></head>
+   926→   926→  <body><div class="c"><div class="logo">🤖</div><h1>JARVIS Hybrid</h1>
+   927→   927→  <p>انٹرنیٹ کنکشن نہیں ملا</p>${reason ? '<p style="color:#ff6b6b;font-size:13px">' + reason + '</p>' : ''}
+   928→   928→  <button class="btn" onclick="window.electronAPI?.retryLoad()">🔄 دوبارہ کوشش</button>
+   929→   929→  <p style="margin-top:20px;font-size:12px;color:#555">JARVIS Hybrid Desktop v${APP_VERSION}</p></div></body></html>`;
+   930→   930→  mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html)).catch(() => {});
+   931→   931→}
+   932→   932→
+   933→   933→function createTray() {
+   934→   934→  try {
+   935→   935→    const iconPath = getIconPath();
+   936→   936→    if (!iconPath) { log('WARN', 'No icon for tray'); return; }
+   937→   937→    tray = new Tray(iconPath);
+   938→   938→    trayCreated = true;
+   939→   939→    tray.setContextMenu(Menu.buildFromTemplate([
+   940→   940→      { label: 'JARVIS v' + APP_VERSION, enabled: false },
+   941→   941→      { type: 'separator' },
+   942→   942→      { label: 'Open', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } else createWindow(); } },
+   943→   943→      { label: 'Hard Refresh', click: () => hardRefresh() },
+   944→   944→      { type: 'separator' },
+   945→   945→      { label: 'Check Updates', click: () => checkForUpdates() },
+   946→   946→      { type: 'separator' },
+   947→   947→      { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
+   948→   948→    ]));
+   949→   949→    tray.setToolTip('JARVIS Hybrid v' + APP_VERSION);
+   950→   950→    tray.on('double-click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } else createWindow(); });
+   951→   951→  } catch (err) { log('WARN', 'Failed to create tray:', err.message); trayCreated = false; }
+   952→   952→}
+   953→   953→
+   954→   954→// ─── Auto-Update handlers are in the updater section above ───
+   955→   955→
+   956→   956→// ─── IPC Handlers ───
+   957→   957→ipcMain.on('window-minimize', () => { if (mainWindow) mainWindow.minimize(); });
+   958→   958→ipcMain.on('window-maximize', () => { if (mainWindow) { mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } });
+   959→   959→ipcMain.on('window-close', () => { if (!mainWindow) return; if (trayCreated) mainWindow.hide(); else { isQuitting = true; mainWindow.close(); } });
+   960→   960→ipcMain.on('check-for-updates', () => checkForUpdates());
+   961→   961→ipcMain.handle('check-for-updates', async () => { checkForUpdates(); return { started: true }; });
+   962→   962→ipcMain.on('install-update', () => installUpdateNow());
+   963→   963→ipcMain.handle('get-app-version', () => APP_VERSION);
+   964→   964→ipcMain.handle('get-update-diagnostics', () => getUpdateDiagnostics());
+   965→   965→ipcMain.handle('get-update-log', () => updaterLogEntries.join('\n'));
+   966→   966→ipcMain.handle('install-update-now', () => installUpdateNow());
+   967→   967→ipcMain.on('retry-load', () => loadWebApp());
+   968→   968→ipcMain.on('reload-page', () => { if (mainWindow) mainWindow.reload(); });
+   969→   969→ipcMain.on('hard-refresh', () => hardRefresh());
+   970→   970→ipcMain.on('clear-cache', async () => { await clearBrowserCache(); if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('cache-cleared', { success: true }); });
+   971→   971→ipcMain.handle('toggle-devtools', () => { if (mainWindow) mainWindow.webContents.toggleDevTools(); });
+   972→   972→ipcMain.handle('get-log-path', () => logFile);
+   973→   973→ipcMain.handle('is-desktop', () => true);
+   974→   974→
+   975→   975→// IPC: Save API keys to .env file so they persist across sessions and are available in main process
+   976→   976→ipcMain.handle('save-api-keys', async (_, keys = {}) => {
+   977→   977→  try {
+   978→   978→    const envPath = path.join(__dirname, '..', '.env');
+   979→   979→    const existingLines = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8').split('\n') : [];
+   980→   980→    const envMap = {};
+   981→   981→    for (const line of existingLines) {
+   982→   982→      const trimmed = line.trim();
+   983→   983→      if (!trimmed || trimmed.startsWith('#')) continue;
+   984→   984→      const match = trimmed.match(/^([A-Z_]+)=(.*)$/);
+   985→   985→      if (match) envMap[match[1]] = match[2].replace(/^["']|["']$/g, '');
+   986→   986→    }
+   987→   987→    const keyMapping = {
+   988→   988→      groq: 'GROQ_API_KEY',
+   989→   989→      openai: 'OPENAI_API_KEY',
+   990→   990→      gemini: 'GEMINI_API_KEY',
+   991→   991→      elevenlabs: 'ELEVENLABS_API_KEY',
+   992→   992→      sarvam: 'SARVAM_API_KEY',
+   993→   993→    };
+   994→   994→    for (const [shortName, envName] of Object.entries(keyMapping)) {
+   995→   995→      if (keys[shortName] !== undefined) {
+   996→   996→        envMap[envName] = keys[shortName];
+   997→   997→        process.env[envName] = keys[shortName]; // Also set in current process
+   998→   998→      }
+   999→   999→    }
+  1000→  1000→    const lines = ['# JARVIS Hybrid API Keys', '# Auto-generated - do not edit manually'];
+  1001→  1001→    for (const [key, value] of Object.entries(envMap)) {
+  1002→  1002→      lines.push(`${key}=${value}`);
+  1003→  1003→    }
+  1004→  1004→    fs.writeFileSync(envPath, lines.join('\n') + '\n', 'utf8');
+  1005→  1005→    log('INFO', '[Env] API keys saved to .env file');
+  1006→  1006→    return { success: true };
+  1007→  1007→  } catch (err) {
+  1008→  1008→    log('ERROR', '[Env] Failed to save API keys:', err.message);
+  1009→  1009→    return { success: false, error: err.message };
+  1010→  1010→  }
+  1011→  1011→});
+  1012→  1012→
+  1013→  1013→// IPC: Get available API key status (without revealing the actual keys)
+  1014→  1014→ipcMain.handle('get-api-key-status', () => {
+  1015→  1015→  return {
+  1016→  1016→    groq: !!(process.env.GROQ_API_KEY),
+  1017→  1017→    openai: !!(process.env.OPENAI_API_KEY),
+  1018→  1018→    gemini: !!(process.env.GEMINI_API_KEY),
+  1019→  1019→    elevenlabs: !!(process.env.ELEVENLABS_API_KEY),
+  1020→  1020→    sarvam: !!(process.env.SARVAM_API_KEY),
+  1021→  1021→  };
+  1022→  1022→});
+  1023→  1023→ipcMain.handle('get-app-url', () => CLOUD_APP_URL);
+  1024→  1024→ipcMain.handle('get-platform', () => process.platform);
+  1025→  1025→ipcMain.handle('get-status', () => ({ cloudReady, pythonReady, cloudError, pythonError, backendUrl: CLOUD_APP_URL }));
+  1026→  1026→ipcMain.handle('listen-once', async (_, language) => listenWithWindowsSpeech(language));
+  1027→  1027→ipcMain.handle('desktop-action', async (_, action = {}) => {
+  1028→  1028→  try {
+  1029→  1029→    const type = action.type || action.action;
+  1030→  1030→    const nativeResult = await executeDesktopAction(action);
+  1031→  1031→    if (nativeResult.success || nativeResult.message !== 'Unknown desktop action') return nativeResult;
+  1032→  1032→    if (type === 'open-folder') {
+  1033→  1033→      await shell.openPath(action.path);
+  1034→  1034→      return { success: true, message: 'Opened folder' };
+  1035→  1035→    }
+  1036→  1036→    if (type === 'notification') {
+  1037→  1037→      new Notification({ title: action.title || 'JARVIS', body: action.body || '' }).show();
+  1038→  1038→      return { success: true, message: 'Notification shown' };
+  1039→  1039→    }
+  1040→  1040→    return { success: false, message: 'Unknown desktop action' };
+  1041→  1041→  } catch (err) {
+  1042→  1042→    return { success: false, message: err instanceof Error ? err.message : String(err) };
+  1043→  1043→  }
+  1044→  1044→});
+  1045→  1045→
+  1046→  1046→// ─── Voice IPC: Direct STT & TTS from Main Process ───
+  1047→  1047→// These bypass the renderer's fetch() calls which can fail in Electron
+  1048→  1048→
+  1049→  1049→function buildMultipart(fields, boundary) {
+  1050→  1050→  const parts = [];
+  1051→  1051→  for (const [name, value] of Object.entries(fields)) {
+  1052→  1052→    if (value && typeof value === 'object' && value.filename) {
+  1053→  1053→      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"; filename="${value.filename}"\r\nContent-Type: ${value.contentType || 'application/octet-stream'}\r\n\r\n`, 'utf8'));
+  1054→  1054→      parts.push(Buffer.isBuffer(value.data) ? value.data : Buffer.from(value.data));
+  1055→  1055→      parts.push(Buffer.from('\r\n', 'utf8'));
+  1056→  1056→    } else {
+  1057→  1057→      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`, 'utf8'));
+  1058→  1058→    }
+  1059→  1059→  }
+  1060→  1060→  parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+  1061→  1061→  return Buffer.concat(parts);
+  1062→  1062→}
+  1063→  1063→
+  1064→  1064→function httpsPostBuffer(urlStr, body, headers) {
+  1065→  1065→  return new Promise((resolve, reject) => {
+  1066→  1066→    const parsedUrl = new URL(urlStr);
+  1067→  1067→    const mod = parsedUrl.protocol === 'http:' ? require('http') : require('https');
+  1068→  1068→    const options = {
+  1069→  1069→      hostname: parsedUrl.hostname,
+  1070→  1070→      port: parsedUrl.port || (parsedUrl.protocol === 'http:' ? 80 : 443),
+  1071→  1071→      path: parsedUrl.pathname + parsedUrl.search,
+  1072→  1072→      method: 'POST',
+  1073→  1073→      headers: { ...headers, 'Content-Length': body.length },
+  1074→  1074→    };
+  1075→  1075→    const req = mod.request(options, (res) => {
+  1076→  1076→      const chunks = [];
+  1077→  1077→      res.on('data', (chunk) => chunks.push(chunk));
+  1078→  1078→      res.on('end', () => {
+  1079→  1079→        const data = Buffer.concat(chunks);
+  1080→  1080→        resolve({ statusCode: res.statusCode, headers: res.headers, data });
+  1081→  1081→      });
+  1082→  1082→    });
+  1083→  1083→    req.on('error', reject);
+  1084→  1084→    req.setTimeout(30000, () => { req.destroy(new Error('Request timeout')); });
+  1085→  1085→    req.write(body);
+  1086→  1086→    req.end();
+  1087→  1087→  });
+  1088→  1088→}
+  1089→  1089→
+  1090→  1090→// IPC: Transcribe audio (base64) via Groq/OpenAI Whisper
+  1091→  1091→ipcMain.handle('transcribe-audio-base64', async (_, base64Audio, language = 'ur', apiKeys = {}) => {
+  1092→  1092→  try {
+  1093→  1093→    const audioBuffer = Buffer.from(base64Audio, 'base64');
+  1094→  1094→    const groqKey = apiKeys.groq || process.env.GROQ_API_KEY || '';
+  1095→  1095→    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+  1096→  1096→
+  1097→  1097→    if (!groqKey && !openaiKey) {
+  1098→  1098→      return { success: false, error: 'Groq or OpenAI API key required for voice transcription' };
+  1099→  1099→    }
+  1100→  1100→
+  1101→  1101→    // Try Groq Whisper first (fastest, cheapest)
+  1102→  1102→    if (groqKey) {
+  1103→  1103→      try {
+  1104→  1104→        const boundary = '----JarvisSTT' + Date.now();
+  1105→  1105→        const body = buildMultipart({
+  1106→  1106→          file: { data: audioBuffer, filename: 'voice.webm', contentType: 'audio/webm' },
+  1107→  1107→          model: 'whisper-large-v3-turbo',
+  1108→  1108→          ...(language === 'ur' ? { language: 'ur' } : language === 'en' ? { language: 'en' } : {}),
+  1109→  1109→        }, boundary);
+  1110→  1110→
+  1111→  1111→        const result = await httpsPostBuffer('https://api.groq.com/openai/v1/audio/transcriptions', body, {
+  1112→  1112→          'Authorization': `Bearer ${groqKey}`,
+  1113→  1113→          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+  1114→  1114→        });
+  1115→  1115→
+  1116→  1116→        if (result.statusCode === 200) {
+  1117→  1117→          const json = JSON.parse(result.data.toString('utf8'));
+  1118→  1118→          if (json.text && json.text.trim()) {
+  1119→  1119→            log('INFO', '[STT-IPC] Groq Whisper success:', json.text.substring(0, 60));
+  1120→  1120→            return { success: true, text: json.text.trim(), method: 'groq-whisper-ipc' };
+  1121→  1121→          }
+  1122→  1122→        }
+  1123→  1123→        log('WARN', '[STT-IPC] Groq failed:', result.statusCode);
+  1124→  1124→      } catch (err) {
+  1125→  1125→        log('WARN', '[STT-IPC] Groq error:', err.message);
+  1126→  1126→      }
+  1127→  1127→    }
+  1128→  1128→
+  1129→  1129→    // Try OpenAI Whisper
+  1130→  1130→    if (openaiKey) {
+  1131→  1131→      try {
+  1132→  1132→        const boundary = '----JarvisSTT' + Date.now();
+  1133→  1133→        const body = buildMultipart({
+  1134→  1134→          file: { data: audioBuffer, filename: 'voice.webm', contentType: 'audio/webm' },
+  1135→  1135→          model: 'whisper-1',
+  1136→  1136→          ...(language === 'ur' ? { language: 'ur' } : language === 'en' ? { language: 'en' } : {}),
+  1137→  1137→        }, boundary);
+  1138→  1138→
+  1139→  1139→        const result = await httpsPostBuffer('https://api.openai.com/v1/audio/transcriptions', body, {
+  1140→  1140→          'Authorization': `Bearer ${openaiKey}`,
+  1141→  1141→          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+  1142→  1142→        });
+  1143→  1143→
+  1144→  1144→        if (result.statusCode === 200) {
+  1145→  1145→          const json = JSON.parse(result.data.toString('utf8'));
+  1146→  1146→          if (json.text && json.text.trim()) {
+  1147→  1147→            log('INFO', '[STT-IPC] OpenAI Whisper success:', json.text.substring(0, 60));
+  1148→  1148→            return { success: true, text: json.text.trim(), method: 'openai-whisper-ipc' };
+  1149→  1149→          }
+  1150→  1150→        }
+  1151→  1151→        log('WARN', '[STT-IPC] OpenAI failed:', result.statusCode);
+  1152→  1152→      } catch (err) {
+  1153→  1153→        log('WARN', '[STT-IPC] OpenAI error:', err.message);
+  1154→  1154→      }
+  1155→  1155→    }
+  1156→  1156→
+  1157→  1157→    return { success: false, error: 'All transcription providers failed. Check API keys.' };
+  1158→  1158→  } catch (err) {
+  1159→  1159→    log('ERROR', '[STT-IPC] Error:', err.message);
+  1160→  1160→    return { success: false, error: err.message };
+  1161→  1161→  }
+  1162→  1162→});
+  1163→  1163→
+  1164→  1164→// IPC: Generate TTS audio via ElevenLabs / OpenAI / Sarvam
+  1165→  1165→ipcMain.handle('tts-generate', async (_, text, lang = 'ur', emotion = 'normal', apiKeys = {}) => {
+  1166→  1166→  try {
+  1167→  1167→    const elevenlabsKey = apiKeys.elevenlabs || process.env.ELEVENLABS_API_KEY || '';
+  1168→  1168→    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+  1169→  1169→    const sarvamKey = apiKeys.sarvam || process.env.SARVAM_API_KEY || '';
+  1170→  1170→
+  1171→  1171→    // Try ElevenLabs Turbo v2.5 first
+  1172→  1172→    if (elevenlabsKey) {
+  1173→  1173→      try {
+  1174→  1174→        const voiceIds = { ur: 'Xb7hH8MSUJpWjnnlVkGX', en: 'EXAVITQu4vr4xnSDxMaL' };
+  1175→  1175→        const voiceId = voiceIds[lang] || voiceIds.ur;
+  1176→  1176→        const emotionSettings = {
+  1177→  1177→          happy: { stability: 0.35, similarity: 0.75, style: 0.8 },
+  1178→  1178→          serious: { stability: 0.55, similarity: 0.8, style: 0.4 },
+  1179→  1179→          sympathetic: { stability: 0.5, similarity: 0.78, style: 0.6 },
+  1180→  1180→          surprised: { stability: 0.3, similarity: 0.72, style: 0.85 },
+  1181→  1181→          encouraging: { stability: 0.4, similarity: 0.76, style: 0.7 },
+  1182→  1182→          normal: { stability: 0.4, similarity: 0.78, style: 0.55 },
+  1183→  1183→        };
+  1184→  1184→        const settings = emotionSettings[emotion] || emotionSettings.normal;
+  1185→  1185→        const bodyStr = JSON.stringify({
+  1186→  1186→          text: text.substring(0, 5000),
+  1187→  1187→          model_id: 'eleven_turbo_v2_5',
+  1188→  1188→          voice_settings: { stability: settings.stability, similarity_boost: settings.similarity, style: settings.style, use_speaker_boost: true },
+  1189→  1189→          output_format: 'mp3_44100_128',
+  1190→  1190→        });
+  1191→  1191→
+  1192→  1192→        const result = await httpsPostBuffer(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, Buffer.from(bodyStr, 'utf8'), {
+  1193→  1193→          'Content-Type': 'application/json',
+  1194→  1194→          'xi-api-key': elevenlabsKey,
+  1195→  1195→          'Accept': 'audio/mpeg',
+  1196→  1196→        });
+  1197→  1197→
+  1198→  1198→        if (result.statusCode === 200 && result.data.length > 500) {
+  1199→  1199→          log('INFO', '[TTS-IPC] ElevenLabs success, size:', result.data.length);
+  1200→  1200→          return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'elevenlabs-ipc' };
+  1201→  1201→        }
+  1202→  1202→        log('WARN', '[TTS-IPC] ElevenLabs failed:', result.statusCode, 'size:', result.data.length);
+  1203→  1203→      } catch (err) {
+  1204→  1204→        log('WARN', '[TTS-IPC] ElevenLabs error:', err.message);
+  1205→  1205→      }
+  1206→  1206→    }
+  1207→  1207→
+  1208→  1208→    // Try OpenAI TTS HD
+  1209→  1209→    if (openaiKey) {
+  1210→  1210→      try {
+  1211→  1211→        const bodyStr = JSON.stringify({
+  1212→  1212→          model: 'tts-1-hd',
+  1213→  1213→          input: text.substring(0, 4096),
+  1214→  1214→          voice: lang === 'ur' ? 'alloy' : 'nova',
+  1215→  1215→          speed: 1.0,
+  1216→  1216→        });
+  1217→  1217→
+  1218→  1218→        const result = await httpsPostBuffer('https://api.openai.com/v1/audio/speech', Buffer.from(bodyStr, 'utf8'), {
+  1219→  1219→          'Content-Type': 'application/json',
+  1220→  1220→          'Authorization': `Bearer ${openaiKey}`,
+  1221→  1221→        });
+  1222→  1222→
+  1223→  1223→        if (result.statusCode === 200 && result.data.length > 500) {
+  1224→  1224→          log('INFO', '[TTS-IPC] OpenAI TTS success, size:', result.data.length);
+  1225→  1225→          return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/mpeg', method: 'openai-tts-ipc' };
+  1226→  1226→        }
+  1227→  1227→        log('WARN', '[TTS-IPC] OpenAI TTS failed:', result.statusCode);
+  1228→  1228→      } catch (err) {
+  1229→  1229→        log('WARN', '[TTS-IPC] OpenAI TTS error:', err.message);
+  1230→  1230→      }
+  1231→  1231→    }
+  1232→  1232→
+  1233→  1233→    // Try Sarvam AI
+  1234→  1234→    if (sarvamKey) {
+  1235→  1235→      try {
+  1236→  1236→        const targetLang = lang === 'ur' ? 'hi-IN' : 'en';
+  1237→  1237→        const bodyStr = JSON.stringify({
+  1238→  1238→          inputs: [text.substring(0, 3000)],
+  1239→  1239→          target_language_code: targetLang,
+  1240→  1240→          speaker_id: 'anushka',
+  1241→  1241→          pitch: 0,
+  1242→  1242→          pace: 1.0,
+  1243→  1243→          loudness: 1.5,
+  1244→  1244→          speech_sample_rate: 24000,
+  1245→  1245→          enable_preprocessing: true,
+  1246→  1246→          model: 'bulbul:v1',
+  1247→  1247→        });
+  1248→  1248→
+  1249→  1249→        const result = await httpsPostBuffer('https://api.sarvam.ai/text-to-speech', Buffer.from(bodyStr, 'utf8'), {
+  1250→  1250→          'Content-Type': 'application/json',
+  1251→  1251→          'api-subscription-key': sarvamKey,
+  1252→  1252→        });
+  1253→  1253→
+  1254→  1254→        if (result.statusCode === 200) {
+  1255→  1255→          // Sarvam may return JSON with base64 audio
+  1256→  1256→          try {
+  1257→  1257→            const json = JSON.parse(result.data.toString('utf8'));
+  1258→  1258→            if (json.audios && json.audios[0]) {
+  1259→  1259→              const audioBuffer = Buffer.from(json.audios[0], 'base64');
+  1260→  1260→              if (audioBuffer.length > 500) {
+  1261→  1261→                log('INFO', '[TTS-IPC] Sarvam AI success, size:', audioBuffer.length);
+  1262→  1262→                return { success: true, audioBase64: audioBuffer.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
+  1263→  1263→              }
+  1264→  1264→            }
+  1265→  1265→          } catch {}
+  1266→  1266→          // Or direct audio
+  1267→  1267→          if (result.data.length > 500) {
+  1268→  1268→            log('INFO', '[TTS-IPC] Sarvam AI direct audio, size:', result.data.length);
+  1269→  1269→            return { success: true, audioBase64: result.data.toString('base64'), contentType: 'audio/wav', method: 'sarvam-ipc' };
+  1270→  1270→          }
+  1271→  1271→        }
+  1272→  1272→        log('WARN', '[TTS-IPC] Sarvam failed:', result.statusCode);
+  1273→  1273→      } catch (err) {
+  1274→  1274→        log('WARN', '[TTS-IPC] Sarvam error:', err.message);
+  1275→  1275→      }
+  1276→  1276→    }
+  1277→  1277→
+  1278→  1278→    return { success: false, error: 'TTS providers unavailable. Set ElevenLabs, OpenAI, or Sarvam key in Settings.' };
+  1279→  1279→  } catch (err) {
+  1280→  1280→    log('ERROR', '[TTS-IPC] Error:', err.message);
+  1281→  1281→    return { success: false, error: err.message };
+  1282→  1282→  }
+  1283→  1283→});
+  1284→  1284→
+  1285→  1285→// ─── IPC: Direct Chat Completion (bypasses Next.js backend) ───
+  1286→  1286→// This makes the Electron app self-sufficient - chat works even without backend
+  1287→  1287→ipcMain.handle('chat-completion', async (_, message, conversationHistory = [], activeProvider = 'groq', apiKeys = {}) => {
+  1288→  1288→  try {
+  1289→  1289→    const groqKey = apiKeys.groq || process.env.GROQ_API_KEY || '';
+  1290→  1290→    const geminiKey = apiKeys.gemini || process.env.GEMINI_API_KEY || '';
+  1291→  1291→    const openaiKey = apiKeys.openai || process.env.OPENAI_API_KEY || '';
+  1292→  1292→
+  1293→  1293→    if (!groqKey && !geminiKey && !openaiKey) {
+  1294→  1294→      return { success: false, message: '⚠️ کوئی API Key موجود نہیں۔ Settings میں جا کر API Key ڈالیں۔', emotion: 'encouraging', error: 'No API keys' };
+  1295→  1295→    }
+  1296→  1296→
+  1297→  1297→    // Build system prompt (same as agent-core.ts)
+  1298→  1298→    const systemPrompt = `Tu JARVIS hai — Rayan Sir ka apna saathi. Tu koi robot nahi, tu ek insaan ki tarah baat karta hai. Rayan Sir ke saath aise baat kar jaise koi sachcha dost ya bhai baat karta hai — dil se, mazay se, zindagi se.
+  1299→  1299→
+  1300→  1300→=== SABSE ZAROORI RULE — ZUBAAN ===
+  1301→  1301→1. Agar user Urdu mein baat kare → SIRF Urdu mein jawab de (Urdu script, Roman nahi)
+  1302→  1302→2. Agar user English mein baat kare → SIRF English mein jawab de
+  1303→  1303→3. Agar user mix kare → SAME mix mein jawab de
+  1304→  1304→4. KABHI Urdu baat pe English mein jawab mat de — yeh sabse bada gunaah hai
+  1305→  1305→5. Sirf technical terms ke liye English use karo (API, code, website, etc.)
+  1306→  1306→
+  1307→  1307→=== BAAT-CHEET KE USOOL — INSAN KI TARAH ===
+  1308→  1308→1. SHORT aur NATURAL baat kar — jaise phone pe baat ho rahi ho
+  1309→  1309→2. Filler words use kar — "aray", "yaar", "achha", "haan bilkul", "hmm", "bhai"
+  1310→  1310→3. Emotions dikhao — khushi, herat, tadap, hosla — sab kuch naturally
+  1311→  1311→4. KABHI bhi "I can help you with" ya "How can I assist" jaise robotic phrases mat bolo
+  1312→  1312→5. KABHI bhi "As an AI" ya "I'm an assistant" mat kaho
+  1313→  1313→6. Mazaaq kar, hans, serious ho ja — jaise koi insaan karta hai
+  1314→  1314→7. Sawal ke hisaab se jawab de — chhota sawal = chhota jawab
+  1315→  1315→8. Lists aur headings mat banao casual baat mein — seedha bol de
+  1316→  1316→
+  1317→  1317→=== DESKTOP ACTIONS ===
+  1318→  1318→Tu JARVIS Desktop pe chal raha hai. Jab user koi command de jo teri capabilities mein hai, tu ACTION BLOCK likhta hai.
+  1319→  1319→Format: [ACTION:{"type":"action_type","key":"value"}]
+  1320→  1320→
+  1321→  1321→ACTION TYPES:
+  1322→  1322→- open-youtube: YouTube kholna/search. Params: query
+  1323→  1323→- open-url: URL kholna. Params: url
+  1324→  1324→- search-google: Google search. Params: query
+  1325→  1325→- open-app: App kholna. Params: app (notepad, chrome, calculator, paint, cmd, powershell)
+  1326→  1326→- volume-up / volume-down / mute-toggle
+  1327→  1327→- screenshot
+  1328→  1328→- system-command: Params: command (sirf "lock")
+  1329→  1329→- open-folder: Params: path
+  1330→  1330→- notification: Params: title, body
+  1331→  1331→
+  1332→  1332→EXAMPLES:
+  1333→  1333→- "یوٹیوب کھولو" → "یوٹیوب کھول رہا ہوں! 🎬" [ACTION:{"type":"open-youtube","query":""}]
+  1334→  1334→- "یوٹیوب پر تلاوت لگاؤ" → "تلاوت لگا رہا ہوں! 🕌" [ACTION:{"type":"open-youtube","query":"quran tilawat"}]
+  1335→  1335→- "chrome kholo" → "Chrome khol raha hoon!" [ACTION:{"type":"open-app","app":"chrome"}]
+  1336→  1336→- "والیوم اپ" → "والیوم بڑھا دیا! 🔊" [ACTION:{"type":"volume-up"}]
+  1337→  1337→- "گوگل پر سرچ کرو AI jobs" → "سرچ کر رہا ہوں! 🔍" [ACTION:{"type":"search-google","query":"AI jobs"}]`;
+  1338→  1338→
+  1339→  1339→    const messages = [
+  1340→  1340→      { role: 'system', content: systemPrompt },
+  1341→  1341→      ...conversationHistory.slice(-10).map(m => ({ role: m.role, content: m.content })),
+  1342→  1342→      { role: 'user', content: message },
+  1343→  1343→    ];
+  1344→  1344→
+  1345→  1345→    // Determine provider priority
+  1346→  1346→    const providers = [];
+  1347→  1347→    if (activeProvider === 'openai' && openaiKey) providers.push('openai');
+  1348→  1348→    if (activeProvider === 'gemini' && geminiKey) providers.push('gemini');
+  1349→  1349→    if (activeProvider === 'groq' && groqKey) providers.push('groq');
+  1350→  1350→    // Fallback to any available
+  1351→  1351→    if (groqKey && !providers.includes('groq')) providers.push('groq');
+  1352→  1352→    if (openaiKey && !providers.includes('openai')) providers.push('openai');
+  1353→  1353→    if (geminiKey && !providers.includes('gemini')) providers.push('gemini');
+  1354→  1354→
+  1355→  1355→    for (const provider of providers) {
+  1356→  1356→      try {
+  1357→  1357→        let responseText = '';
+  1358→  1358→
+  1359→  1359→        if (provider === 'groq' && groqKey) {
+  1360→  1360→          const bodyStr = JSON.stringify({ model: 'llama-3.3-70b-versatile', messages, temperature: 0.7, max_tokens: 2048 });
+  1361→  1361→          const result = await httpsPostBuffer('https://api.groq.com/openai/v1/chat/completions', Buffer.from(bodyStr, 'utf8'), {
+  1362→  1362→            'Content-Type': 'application/json',
+  1363→  1363→            'Authorization': `Bearer ${groqKey}`,
+  1364→  1364→          });
+  1365→  1365→          if (result.statusCode === 200) {
+  1366→  1366→            const json = JSON.parse(result.data.toString('utf8'));
+  1367→  1367→            responseText = json.choices?.[0]?.message?.content || '';
+  1368→  1368→          } else {
+  1369→  1369→            log('WARN', '[Chat-IPC] Groq failed:', result.statusCode);
+  1370→  1370→            continue;
+  1371→  1371→          }
+  1372→  1372→        } else if (provider === 'openai' && openaiKey) {
+  1373→  1373→          const bodyStr = JSON.stringify({ model: 'gpt-4o-mini', messages, temperature: 0.7, max_tokens: 2048 });
+  1374→  1374→          const result = await httpsPostBuffer('https://api.openai.com/v1/chat/completions', Buffer.from(bodyStr, 'utf8'), {
+  1375→  1375→            'Content-Type': 'application/json',
+  1376→  1376→            'Authorization': `Bearer ${openaiKey}`,
+  1377→  1377→          });
+  1378→  1378→          if (result.statusCode === 200) {
+  1379→  1379→            const json = JSON.parse(result.data.toString('utf8'));
+  1380→  1380→            responseText = json.choices?.[0]?.message?.content || '';
+  1381→  1381→          } else {
+  1382→  1382→            log('WARN', '[Chat-IPC] OpenAI failed:', result.statusCode);
+  1383→  1383→            continue;
+  1384→  1384→          }
+  1385→  1385→        } else if (provider === 'gemini' && geminiKey) {
+  1386→  1386→          const bodyStr = JSON.stringify({
+  1387→  1387→            contents: messages.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] })),
+  1388→  1388→            generationConfig: { temperature: 0.7, maxOutputTokens: 2048 },
+  1389→  1389→          });
+  1390→  1390→          const result = await httpsPostBuffer(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiKey}`, Buffer.from(bodyStr, 'utf8'), {
+  1391→  1391→            'Content-Type': 'application/json',
+  1392→  1392→          });
+  1393→  1393→          if (result.statusCode === 200) {
+  1394→  1394→            const json = JSON.parse(result.data.toString('utf8'));
+  1395→  1395→            responseText = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  1396→  1396→          } else {
+  1397→  1397→            log('WARN', '[Chat-IPC] Gemini failed:', result.statusCode);
+  1398→  1398→            continue;
+  1399→  1399→          }
+  1400→  1400→        }
+  1401→  1401→
+  1402→  1402→        if (responseText.trim()) {
+  1403→  1403→          log('INFO', '[Chat-IPC] Success via', provider, '- length:', responseText.length);
+  1404→  1404→
+  1405→  1405→          // Detect emotion
+  1406→  1406→          const lowerMsg = message.toLowerCase();
+  1407→  1407→          let emotion = 'normal';
+  1408→  1408→          if (/شکریہ|بہت اچھا|زبردست|thanks|great|awesome/.test(lowerMsg)) emotion = 'happy';
+  1409→  1409→          else if (/مدد|ناممکن|مشکل|help|can't|difficult/.test(lowerMsg)) emotion = 'encouraging';
+  1410→  1410→          else if (/اداس|تنگ|sad|upset|worried|پریشان/.test(lowerMsg)) emotion = 'sympathetic';
+  1411→  1411→
+  1412→  1412→          return { success: true, message: responseText.trim(), emotion, method: `${provider}-ipc` };
+  1413→  1413→        }
+  1414→  1414→      } catch (err) {
+  1415→  1415→        log('WARN', `[Chat-IPC] ${provider} error:`, err.message);
+  1416→  1416→        continue;
+  1417→  1417→      }
+  1418→  1418→    }
+  1419→  1419→
+  1420→  1420→    return { success: false, message: 'تمام ماڈلز نے جواب دینے سے انکار کر دیا۔ API Key چیک کریں۔', emotion: 'sympathetic', error: 'All providers failed' };
+  1421→  1421→  } catch (err) {
+  1422→  1422→    log('ERROR', '[Chat-IPC] Error:', err.message);
+  1423→  1423→    return { success: false, message: 'چیٹ میں مسئلہ آ گیا۔', emotion: 'sympathetic', error: err.message };
+  1424→  1424→  }
+  1425→  1425→});
+  1426→  1426→
+  1427→  1427→// ─── App Lifecycle ───
+  1428→  1428→app.whenReady().then(async () => {
+  1429→  1429→  log('INFO', 'App ready');
+  1430→  1430→
+  1431→  1431→  try {
+  1432→  1432→    const ses = session.fromPartition('persist:jarvis');
+  1433→  1433→    await ses.clearCache();
+  1434→  1434→    await ses.clearStorageData({ storages: ['cache', 'serviceworker', 'shadercache'] });
+  1435→  1435→    log('INFO', 'Startup cache cleared');
+  1436→  1436→  } catch (err) { log('WARN', 'Cache clear failed:', err.message); }
+  1437→  1437→
+  1438→  1438→  // Launch subprocesses
+  1439→  1439→  log('INFO', '[Launcher] Starting services...');
+  1440→  1440→
+  1441→  1441→  if (SKIP_SERVICE_LAUNCH) {
+  1442→  1442→    log('INFO', '[Launcher] Service launch skipped by START_JARVIS');
+  1443→  1443→    cloudReady = await waitForCloud();
+  1444→  1444→    if (!cloudReady) cloudError = cloudError || 'External backend did not become healthy on http://127.0.0.1:3000';
+  1445→  1445→    pythonReady = true;
+  1446→  1446→  } else {
+  1447→  1447→    try {
+  1448→  1448→      await launchCloudBackend();
+  1449→  1449→      await waitForCloud();
+  1450→  1450→    } catch (err) {
+  1451→  1451→      log('ERROR', '[Launcher] Cloud backend failed:', err.message);
+  1452→  1452→    }
+  1453→  1453→
+  1454→  1454→    try {
+  1455→  1455→      await launchPythonAgent();
+  1456→  1456→    } catch (err) {
+  1457→  1457→      log('ERROR', '[Launcher] Python agent failed:', err.message);
+  1458→  1458→    }
+  1459→  1459→  }
+  1460→  1460→
+  1461→  1461→  createWindow();
+  1462→  1462→  createTray();
+  1463→  1463→
+  1464→  1464→  // ─── Auto-update: check on startup after 5s delay ───
+  1465→  1465→  if (app.isPackaged) {
+  1466→  1466→    log('INFO', 'App is packaged — scheduling initial update check in 5 seconds...');
+  1467→  1467→    setTimeout(() => {
+  1468→  1468→      checkForUpdates();
+  1469→  1469→      startPeriodicUpdateCheck();
+  1470→  1470→    }, 5000);
+  1471→  1471→  } else {
+  1472→  1472→    log('INFO', 'App is NOT packaged — skipping auto-update check on startup');
+  1473→  1473→  }
+  1474→  1474→  setInterval(() => { if (loadFailed && isOnline()) loadWebApp(); }, 10000);
+  1475→  1475→}).catch(err => { dialog.showErrorBox('JARVIS Error', err.message); app.quit(); });
+  1476→  1476→
+  1477→  1477→app.on('window-all-closed', () => { if (process.platform !== 'darwin' && !trayCreated) app.quit(); });
+  1478→  1478→app.on('activate', () => { if (!mainWindow) createWindow(); else { mainWindow.show(); mainWindow.focus(); } });
+  1479→  1479→app.on('before-quit', () => {
+  1480→  1480→  isQuitting = true;
+  1481→  1481→  cleanupProcesses();
+  1482→  1482→});
+  1483→  1483→
+  1484→  1484→const gotTheLock = app.requestSingleInstanceLock();
+  1485→  1485→if (!gotTheLock) { app.quit(); } else {
+  1486→  1486→  app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); } });
+  1487→  1487→}
+  1488→  1488→
+  1489→  1489→log('INFO', 'Main process loaded');
+  1490→  1490→

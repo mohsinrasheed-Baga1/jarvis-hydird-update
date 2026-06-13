@@ -2,13 +2,18 @@ name: Build & Release JARVIS Hybrid
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
-  workflow_dispatch:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  build-and-release:
     runs-on: windows-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -17,23 +22,61 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm'
+          cache-dependency-path: desktop-app/package-lock.json
 
       - name: Install desktop-app dependencies
         working-directory: desktop-app
-        run: npm install
+        run: npm ci
 
-      - name: Build React + Vite
+      - name: Build frontend (Vite)
         working-directory: desktop-app
         run: npx vite build
 
-      - name: Build & Publish Electron App
+      - name: Package & Publish on Tag
+        if: startsWith(github.ref, 'refs/tags/v')
         working-directory: desktop-app
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: npx electron-builder --win --x64 --publish always
+
+      - name: Package only on Main push (no publish)
+        if: "!startsWith(github.ref, 'refs/tags/v')"
+        working-directory: desktop-app
+        run: npx electron-builder --win --x64 --publish never
+
+      - name: Verify build output
+        shell: pwsh
         run: |
-          # Tag push = publish release, main push = build only
-          if ("${{ github.ref }}" -match "refs/tags/v") {
-            npx electron-builder --win --x64 --publish always
+          Write-Host "=== Checking build output ==="
+          $releaseDir = "desktop-app/release"
+          if (Test-Path $releaseDir) {
+            Get-ChildItem -Path $releaseDir -Recurse -File | ForEach-Object {
+              $sizeMB = [math]::Round($_.Length / 1MB, 2)
+              Write-Host "  File: $($_.Name) ($sizeMB MB)"
+            }
           } else {
-            npx electron-builder --win --x64 --publish never
+            Write-Host "WARNING: release directory not found"
           }
+
+      - name: Verify release assets (tag push only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          Write-Host "=== Verifying release assets ==="
+          $releaseDir = "desktop-app/release"
+
+          $ymlFiles = Get-ChildItem -Path $releaseDir -Recurse -Filter "latest.yml" -ErrorAction SilentlyContinue
+          $exeFiles = Get-ChildItem -Path $releaseDir -Recurse -Filter "JARVIS-Setup-*.exe" -ErrorAction SilentlyContinue
+          $blockmapFiles = Get-ChildItem -Path $releaseDir -Recurse -Filter "*.blockmap" -ErrorAction SilentlyContinue
+
+          if ($ymlFiles.Count -eq 0) { Write-Error "MISSING: latest.yml not found in release assets"; exit 1 }
+          if ($exeFiles.Count -eq 0) { Write-Error "MISSING: Setup EXE not found in release assets"; exit 1 }
+          if ($blockmapFiles.Count -eq 0) { Write-Error "MISSING: .blockmap not found in release assets"; exit 1 }
+
+          Write-Host "=== All critical release assets verified ==="
+          Write-Host "  latest.yml: $($ymlFiles[0].Name)"
+          Write-Host "  Setup EXE: $($exeFiles[0].Name)"
+          Write-Host "  Blockmap: $($blockmapFiles[0].Name)"
