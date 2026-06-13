@@ -81,7 +81,7 @@ export default function App() {
           </div>
           <div className="min-w-0">
             <h1 className="text-base font-semibold tracking-wide text-white">JARVIS Hybrid</h1>
-            <p className="text-xs text-slate-500">Business Agent v3.0.2</p>
+            <p className="text-xs text-slate-500">Business Agent v3.0.3</p>
           </div>
         </div>
 

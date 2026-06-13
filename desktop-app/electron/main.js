@@ -31,7 +31,7 @@ try {
 const CLOUD_APP_URL = 'http://127.0.0.1:3000';
 const VITE_DEV_URL = 'http://127.0.0.1:5173';
 const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
-const APP_VERSION = '3.0.2';
+const APP_VERSION = '3.0.3';
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
 const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
 const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
@@ -1424,7 +1424,7 @@ ipcMain.handle('crm-add-lead', async (_, lead) => {
 // IPC: CRM - Update lead
 ipcMain.handle('crm-update-lead', async (_, id, updates) => {
   const crm = loadCRM();
-  const idx = crm.leads.findIndex((l: any) => l.id === id);
+  const idx = crm.leads.findIndex((l) => l.id === id);
   if (idx === -1) return { success: false, error: 'Lead not found' };
   crm.leads[idx] = { ...crm.leads[idx], ...updates };
   saveCRM(crm);
@@ -1456,7 +1456,7 @@ ipcMain.handle('crm-add-proposal', async (_, proposal) => {
 // IPC: CRM - Update proposal
 ipcMain.handle('crm-update-proposal', async (_, id, updates) => {
   const crm = loadCRM();
-  const idx = crm.proposals.findIndex((p: any) => p.id === id);
+  const idx = crm.proposals.findIndex((p) => p.id === id);
   if (idx === -1) return { success: false, error: 'Proposal not found' };
   crm.proposals[idx] = { ...crm.proposals[idx], ...updates };
   saveCRM(crm);
@@ -1752,7 +1752,7 @@ function downloadFile(urlStr, destPath) {
           port: pu.port || (pu.protocol === 'http:' ? 80 : 443),
           path: pu.pathname + pu.search,
           method: 'GET',
-          headers: { 'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.2' },
+          headers: { 'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.3' },
         };
         const req = m.request(opts, (res) => {
           if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
