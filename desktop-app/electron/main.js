@@ -1179,15 +1179,44 @@ async function ensurePiperBinary() {
       }
 
       // Download Piper Windows release
-      const piperVersion = '2023.11.14-2';
-      const piperUrl = `https://github.com/rhasspy/piper/releases/download/${piperVersion}/piper_windows_amd64.zip`;
       const zipPath = path.join(PIPER_BIN_DIR, 'piper.zip');
 
-      const downloadResult = await downloadFile(piperUrl, zipPath);
-      if (!downloadResult.success) {
-        log('WARN', '[Piper] Download failed:', downloadResult.error);
-        return { ready: false, error: 'Piper binary download failed: ' + downloadResult.error };
+      // Try multiple Piper versions/URLs
+      const piperVersions = [
+        { version: '2023.11.14-2', url: `https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip` },
+        { version: '2023.11.14-2', url: `https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_x64.zip` },
+        { version: '2023.11.14-2', url: `https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_win_x64.zip` },
+      ];
+
+      let downloadResult = null;
+      let usedUrl = '';
+      for (const pv of piperVersions) {
+        log('INFO', '[Piper] Trying download URL:', pv.url);
+        downloadResult = await downloadFile(pv.url, zipPath);
+        if (downloadResult.success) {
+          usedUrl = pv.url;
+          break;
+        }
+        log('WARN', '[Piper] URL failed:', pv.url, downloadResult.error);
+        // Clean up failed download
+        try { if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath); } catch {}
       }
+
+      if (!downloadResult || !downloadResult.success) {
+        const errMsg = downloadResult?.error || 'All download URLs failed (network/GitHub redirect issue)';
+        log('WARN', '[Piper] All downloads failed:', errMsg);
+        return { ready: false, error: 'Piper binary download failed: ' + errMsg };
+      }
+
+      // Verify zip file exists and has reasonable size
+      const zipStats = fs.statSync(zipPath);
+      if (zipStats.size < 10000) {
+        log('WARN', '[Piper] Downloaded zip too small:', zipStats.size, 'bytes - likely an error page');
+        try { fs.unlinkSync(zipPath); } catch {}
+        return { ready: false, error: 'Piper binary download failed: downloaded file too small (' + zipStats.size + ' bytes)' };
+      }
+
+      log('INFO', '[Piper] Downloaded zip size:', Math.round(zipStats.size / 1024 / 1024), 'MB from', usedUrl);
 
       // Extract using PowerShell
       const extractResult = await ps(`Expand-Archive -Path '${zipPath}' -DestinationPath '${PIPER_BIN_DIR}' -Force`);
@@ -1198,28 +1227,43 @@ async function ensurePiperBinary() {
         return { ready: true, path: localPiperPath };
       }
 
-      // Check if piper.exe is in a subdirectory
-      const subDir = path.join(PIPER_BIN_DIR, 'piper');
-      const subPiperPath = path.join(subDir, piperBin);
-      if (fs.existsSync(subPiperPath)) {
-        // Move to expected location
-        try {
-          const files = fs.readdirSync(subDir);
-          for (const file of files) {
-            const src = path.join(subDir, file);
-            const dest = path.join(PIPER_BIN_DIR, file);
-            if (!fs.existsSync(dest)) {
-              fs.copyFileSync(src, dest);
+      // Check if piper.exe is in a subdirectory (common with GitHub zip releases)
+      const possibleSubDirs = ['piper', 'piper_windows_amd64', 'piper_windows_x64', 'piper_win_x64', 'piper-2023.11.14-2'];
+      for (const subDirName of possibleSubDirs) {
+        const subDir = path.join(PIPER_BIN_DIR, subDirName);
+        const subPiperPath = path.join(subDir, piperBin);
+        if (fs.existsSync(subPiperPath)) {
+          // Move all files to expected location
+          try {
+            const files = fs.readdirSync(subDir);
+            for (const file of files) {
+              const src = path.join(subDir, file);
+              const dest = path.join(PIPER_BIN_DIR, file);
+              if (!fs.existsSync(dest)) {
+                fs.copyFileSync(src, dest);
+              }
             }
+          } catch (e) { log('WARN', '[Piper] File move error:', e.message); }
+          if (fs.existsSync(localPiperPath)) {
+            return { ready: true, path: localPiperPath };
           }
-        } catch {}
-        if (fs.existsSync(localPiperPath)) {
-          return { ready: true, path: localPiperPath };
+          return { ready: true, path: subPiperPath };
         }
-        return { ready: true, path: subPiperPath };
       }
 
-      return { ready: false, error: 'Piper binary not found after extraction' };
+      // Deep scan for piper.exe in any subdirectory
+      try {
+        const allFiles = fs.readdirSync(PIPER_BIN_DIR, { recursive: true });
+        for (const f of allFiles) {
+          if (String(f).endsWith(piperBin)) {
+            const foundPath = path.join(PIPER_BIN_DIR, String(f));
+            log('INFO', '[Piper] Found piper binary at:', foundPath);
+            return { ready: true, path: foundPath };
+          }
+        }
+      } catch (e) { log('WARN', '[Piper] Deep scan error:', e.message); }
+
+      return { ready: false, error: 'Piper binary not found after extraction. Try downloading manually from https://github.com/rhasspy/piper/releases' };
     }
 
     return { ready: false, error: 'Piper binary auto-download only supported on Windows. Install manually.' };
@@ -1420,9 +1464,23 @@ ipcMain.handle('download-piper-model', async (_, lang) => {
 // IPC: Download Piper binary
 ipcMain.handle('download-piper-binary', async () => {
   try {
+    // Send progress updates to renderer
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('piper-binary-download-progress', { status: 'downloading', percent: 0 });
+    }
     const result = await ensurePiperBinary();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('piper-binary-download-progress', { 
+        status: result.ready ? 'complete' : 'error', 
+        percent: result.ready ? 100 : 0,
+        error: result.error || ''
+      });
+    }
     return result;
   } catch (err) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('piper-binary-download-progress', { status: 'error', percent: 0, error: err.message });
+    }
     return { success: false, error: err.message };
   }
 });
@@ -1820,7 +1878,7 @@ function downloadFile(urlStr, destPath, onProgress) {
           path: pu.pathname + pu.search,
           method: 'GET',
           headers: {
-            'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.5',
+            'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.7',
             'Accept': '*/*',
             'Accept-Encoding': 'identity',
           },
