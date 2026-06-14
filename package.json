@@ -1,6 +1,6 @@
 {
   "name": "jarvis-hybrid-cloud",
-  "version": "1.0.0",
+  "version": "13.1",
   "description": "JARVIS Hybrid - Cloud Backend & Web UI",
   "private": true,
   "scripts": {

@@ -1,6 +1,6 @@
 {
   "name": "jarvis-hybrid",
-  "version": "3.1.0",
+  "version": "13.1",
   "description": "JARVIS Hybrid - AI Desktop Assistant with Voice & Automation",
   "main": "electron/main.js",
   "private": true,

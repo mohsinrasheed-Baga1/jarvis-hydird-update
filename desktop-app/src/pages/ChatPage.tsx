@@ -21,7 +21,7 @@ interface PendingConfirmation {
 const welcomeMessage: StoredChatMessage = {
   id: 'welcome',
   role: 'assistant',
-  content: 'JARVIS Hybrid v3.0.1 ready. Add an API key in Settings, choose a model, and start chatting. Voice input and replies are supported.',
+  content: 'JARVIS Hybrid v13.1 ready. Add an API key in Settings, choose a model, and start chatting. Voice input and replies are supported.',
   timestamp: Date.now(),
 };
 
