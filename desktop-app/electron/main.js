@@ -31,7 +31,7 @@ try {
 const CLOUD_APP_URL = 'http://127.0.0.1:3000';
 const VITE_DEV_URL = 'http://127.0.0.1:5173';
 const REMOTE_FALLBACK_URL = 'https://jarvis-hybrid.vercel.app';
-const APP_VERSION = '3.0.8';
+const APP_VERSION = '3.0.9';
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
 const SKIP_SERVICE_LAUNCH = process.env.JARVIS_SKIP_SERVICE_LAUNCH === '1';
 const LOAD_DIST_UI = process.env.JARVIS_LOAD_DIST === '1';
@@ -1731,6 +1731,32 @@ ipcMain.handle('test-tts', async (_, lang = 'ur') => {
   }
 });
 
+// IPC: Save audio base64 to temp file for reliable playback in Electron
+ipcMain.handle('save-temp-audio', async (_, audioBase64, contentType = 'audio/mpeg') => {
+  try {
+    const ext = contentType.includes('wav') ? '.wav' : contentType.includes('ogg') ? '.ogg' : '.mp3';
+    const audioDir = path.join(app.getPath('userData'), 'audio-cache');
+    if (!fs.existsSync(audioDir)) fs.mkdirSync(audioDir, { recursive: true });
+    // Clean up old files (keep last 10)
+    try {
+      const oldFiles = fs.readdirSync(audioDir).sort();
+      if (oldFiles.length > 10) {
+        for (let i = 0; i < oldFiles.length - 10; i++) {
+          fs.unlinkSync(path.join(audioDir, oldFiles[i]));
+        }
+      }
+    } catch {}
+    const tempFile = path.join(audioDir, `tts-${Date.now()}${ext}`);
+    const buffer = Buffer.from(audioBase64, 'base64');
+    fs.writeFileSync(tempFile, buffer);
+    log('INFO', '[Audio] Saved audio file:', tempFile, 'size:', buffer.length);
+    return { success: true, filePath: tempFile };
+  } catch (err) {
+    log('ERROR', '[Audio] Save audio error:', err.message);
+    return { success: false, error: err.message };
+  }
+});
+
 // Internal TTS generation function (shared by tts-generate and test-tts)
 async function generateTTSInternal(text, lang = 'ur', emotion = 'normal', apiKeys = {}) {
   if (!text || !text.trim()) {
@@ -1878,7 +1904,7 @@ function downloadFile(urlStr, destPath, onProgress) {
           path: pu.pathname + pu.search,
           method: 'GET',
           headers: {
-            'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.8',
+            'User-Agent': 'JARVIS-Hybrid-Desktop/3.0.9',
             'Accept': '*/*',
             'Accept-Encoding': 'identity',
           },
@@ -2021,8 +2047,22 @@ ipcMain.handle('chat-completion', async (_, message, conversationHistory = [], a
 7. Sawal ke hisaab se jawab de — chhota sawal = chhota jawab
 8. Lists aur headings mat banao casual baat mein — seedha bol de
 
+=== SABSE ZAROORI RULE — KHUD SE KOI ACTION MAT KAR ===
+1. TU SIRF TAB ACTION KAREGA JAB USER NE EXPLICITLY COMMAND DE
+2. "کیا حال ہے" → SIRF jawab de, KOI action mat kar
+3. "میں ٹھیک ہوں" → SIRF jawab de, KOI YouTube mat khol, KOI music mat chala
+4. KABHI bhi khud se YouTube, music, browser, ya koi app mat kholna
+5. KABHI bhi khud se koi search ya task mat shuru karna
+6. Agar user ne WOHI kaam kaha jo pehle chal raha hai, TAB HI repeat karo
+7. GENERAL baatcheet mein SIRF text jawab de — KOI [ACTION] block mat likhna
+8. [ACTION] block SIRF tab likhna jab user ne CLEAR command di ho jaise:
+   - "یوٹیوب کھولو" → [ACTION] allowed
+   - "والیوم اپ" → [ACTION] allowed
+   - "کیا حال ہے" → [ACTION] ALLOWED NAHI — sirf text jawab
+   - "ٹھیک ہوں" → [ACTION] ALLOWED NAHI — sirf text jawab
+
 === DESKTOP ACTIONS ===
-Tu JARVIS Desktop pe chal raha hai. Jab user koi command de jo teri capabilities mein hai, tu ACTION BLOCK likhta hai.
+Tu JARVIS Desktop pe chal raha hai. Jab user koi CLEAR command de jo teri capabilities mein hai, tu ACTION BLOCK likhta hai.
 Format: [ACTION:{"type":"action_type","key":"value"}]
 
 ACTION TYPES:
@@ -2036,12 +2076,16 @@ ACTION TYPES:
 - open-folder: Params: path
 - notification: Params: title, body
 
-EXAMPLES:
+EXAMPLES (SIRF CLEAR COMMANDS PE):
 - "یوٹیوب کھولو" → "یوٹیوب کھول رہا ہوں! 🎬" [ACTION:{"type":"open-youtube","query":""}]
 - "یوٹیوب پر تلاوت لگاؤ" → "تلاوت لگا رہا ہوں! 🕌" [ACTION:{"type":"open-youtube","query":"quran tilawat"}]
 - "chrome kholo" → "Chrome khol raha hoon!" [ACTION:{"type":"open-app","app":"chrome"}]
 - "والیوم اپ" → "والیوم بڑھا دیا! 🔊" [ACTION:{"type":"volume-up"}]
-- "گوگل پر سرچ کرو AI jobs" → "سرچ کر رہا ہوں! 🔍" [ACTION:{"type":"search-google","query":"AI jobs"}]`;
+
+ANTI-EXAMPLES (INKO MAT KAR):
+- "کیا حال ہے" → "ارے میں ٹھیک ہوں، بتاؤ تم کیسے ہو؟" ← NO ACTION
+- "میں ٹھیک ہوں" → "اچھا بھیا، کچھ چاہیے تو بتانا!" ← NO ACTION
+- "شکریہ" → "کوئی بات نہیں بھیا! 😊" ← NO ACTION`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -2491,6 +2535,24 @@ ipcMain.handle('play-youtube-auto', async (_, query) => {
 // ─── App Lifecycle ───
 app.whenReady().then(async () => {
   log('INFO', 'App ready');
+
+  // Register custom protocol for local audio playback
+  try {
+    protocol.registerFileProtocol('jarvis-audio', (request, callback) => {
+      const filePath = request.url.replace('jarvis-audio://', '').replace(/\/$/, '');
+      // Security: only allow files from userData/audio-cache directory
+      const audioCacheDir = path.join(app.getPath('userData'), 'audio-cache');
+      const resolvedPath = path.normalize(decodeURIComponent(filePath));
+      if (resolvedPath.startsWith(audioCacheDir) && fs.existsSync(resolvedPath)) {
+        callback({ path: resolvedPath });
+      } else {
+        callback({ error: -2 }); // net.FAILED
+      }
+    });
+    log('INFO', 'Registered jarvis-audio:// protocol');
+  } catch (err) {
+    log('WARN', 'Protocol registration failed:', err.message);
+  }
 
   try {
     const ses = session.fromPartition('persist:jarvis');

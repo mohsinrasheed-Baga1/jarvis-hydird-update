@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   downloadPiperBinary: () => ipcRenderer.invoke('download-piper-binary'),
   installEdgeTTS: () => ipcRenderer.invoke('install-edge-tts'),
   testTTS: (lang) => ipcRenderer.invoke('test-tts', lang),
+  saveTempAudio: (audioBase64, contentType) => ipcRenderer.invoke('save-temp-audio', audioBase64, contentType),
   onPiperDownloadProgress: (cb) => { ipcRenderer.on('piper-download-progress', (_, d) => cb(d)); },
 
   // Direct chat completion via Groq/Gemini/OpenAI

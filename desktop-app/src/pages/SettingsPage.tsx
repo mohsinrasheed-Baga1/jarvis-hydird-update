@@ -269,7 +269,7 @@ export default function SettingsPage() {
           <div className="grid grid-cols-2 gap-4">
             <div className="bg-slate-800 rounded-lg p-4">
               <p className="text-xs text-slate-500 mb-1">Current Version</p>
-              <p className="text-xl font-bold text-white">v3.0.8</p>
+              <p className="text-xl font-bold text-white">v3.0.9</p>
             </div>
             <div className="bg-slate-800 rounded-lg p-4">
               <p className="text-xs text-slate-500 mb-1">Latest Version</p>

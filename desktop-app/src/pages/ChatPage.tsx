@@ -160,20 +160,32 @@ export default function ChatPage({ backend }: ChatPageProps) {
         try {
           const ttsResult = await electronAPI.generateTTS(text, lang, emotion, apiKeys);
           if (ttsResult.success && ttsResult.audioBase64) {
-            // Use Blob URL instead of data URL — much more reliable in Electron
-            const audioUrl = base64ToBlobUrl(ttsResult.audioBase64, ttsResult.contentType || 'audio/mpeg');
-            cleanupAudioUrl();
-            audioRef.current?.pause();
-            audioRef.current = new Audio(audioUrl);
-            audioRef.current.onplay = () => setSpeechStatus('Speaking...');
-            audioRef.current.onended = () => { setSpeechStatus(''); cleanupAudioUrl(); };
-            audioRef.current.onerror = () => {
-              cleanupAudioUrl();
-              // IPC TTS audio failed to play — fall back to browser voice
-              console.warn('IPC TTS audio play failed, falling back to browser voice');
-              fallbackSpeakAssistantResponse(text);
-            };
-            await audioRef.current.play();
+            // Try saving as temp file first (most reliable in Electron)
+            // then play from file URL instead of blob URL
+            try {
+              const saveResult = await electronAPI.saveTempAudio?.(ttsResult.audioBase64, ttsResult.contentType || 'audio/mpeg');
+              if (saveResult?.success && saveResult?.filePath) {
+                cleanupAudioUrl();
+                audioRef.current?.pause();
+                audioRef.current = new Audio(`jarvis-audio://${saveResult.filePath}`);
+                audioRef.current.volume = 1.0;
+                audioRef.current.onplay = () => setSpeechStatus('Speaking...');
+                audioRef.current.onended = () => { setSpeechStatus(''); cleanupAudioUrl(); };
+                audioRef.current.onerror = () => {
+                  cleanupAudioUrl();
+                  // File URL failed, try blob URL
+                  console.warn('File URL audio play failed, trying blob URL');
+                  playAudioFromBlob(ttsResult.audioBase64, ttsResult.contentType || 'audio/mpeg');
+                };
+                await audioRef.current.play();
+                return;
+              }
+            } catch (fileErr) {
+              console.warn('Temp file audio failed, using blob URL:', fileErr);
+            }
+
+            // Fallback: Use Blob URL
+            playAudioFromBlob(ttsResult.audioBase64, ttsResult.contentType || 'audio/mpeg');
             return;
           }
           // TTS provider returned failure — log and fall through
@@ -190,6 +202,7 @@ export default function ChatPage({ backend }: ChatPageProps) {
         cleanupAudioUrl();
         audioRef.current?.pause();
         audioRef.current = new Audio(url);
+        audioRef.current.volume = 1.0;
         audioRef.current.onplay = () => setSpeechStatus('Speaking...');
         audioRef.current.onended = () => { setSpeechStatus(''); URL.revokeObjectURL(url); };
         audioRef.current.onerror = () => {
@@ -207,6 +220,27 @@ export default function ChatPage({ backend }: ChatPageProps) {
     } catch {
       fallbackSpeakAssistantResponse(text);
     }
+  };
+
+  // Play audio from blob URL (fallback when file URL doesn't work)
+  const playAudioFromBlob = (audioBase64: string, contentType: string) => {
+    const audioUrl = base64ToBlobUrl(audioBase64, contentType);
+    cleanupAudioUrl();
+    audioRef.current?.pause();
+    audioRef.current = new Audio(audioUrl);
+    audioRef.current.volume = 1.0;
+    audioRef.current.onplay = () => setSpeechStatus('Speaking...');
+    audioRef.current.onended = () => { setSpeechStatus(''); cleanupAudioUrl(); };
+    audioRef.current.onerror = () => {
+      cleanupAudioUrl();
+      console.warn('Blob URL audio play failed, falling back to browser voice');
+      fallbackSpeakAssistantResponse(''); // Will trigger browser voice
+    };
+    audioRef.current.play().catch(err => {
+      console.error('Audio play() failed:', err);
+      cleanupAudioUrl();
+      fallbackSpeakAssistantResponse('');
+    });
   };
 
   // Parse [ACTION:json] blocks from AI response text
@@ -229,6 +263,27 @@ export default function ChatPage({ backend }: ChatPageProps) {
     cleanText = text.replace(actionRegex, '').trim();
 
     return { cleanText, actions };
+  };
+
+  // Check if the user message is a legitimate action command
+  // This prevents JARVIS from auto-executing actions during casual conversation
+  const isActionCommand = (userMessage: string): boolean => {
+    const lower = userMessage.toLowerCase().trim();
+    // Action keywords that indicate user wants something done
+    const actionKeywords = [
+      // Urdu action words
+      /کھول/, /چلا/, /لگا/, /بجا/, /سرچ/, /ڈھونڈ/, /بڑھا/, /کم/,
+      // English action words
+      /\bopen\b/, /\bplay\b/, /\bsearch\b/, /\blaunch\b/, /\bstart\b/, /\brun\b/,
+      /\bvolume\b/, /\bmute\b/, /\bscreenshot\b/, /\block\b/,
+      // Specific app names as commands
+      /\byoutube\b/i, /\bchrome\b/i, /\bnotepad\b/i, /\bcalculator\b/i,
+      /\bpaint\b/i, /\bcmd\b/i, /\bpowershell\b/i, /\bgoogle\b/i,
+      // Specific content types with action
+      /تلاوت.*لگا/, /نعت.*لگا/, /گانا.*چلا/, /اذان.*لگا/,
+      /موسیقی.*چلا/, /music.*play/i, /song.*play/i,
+    ];
+    return actionKeywords.some(regex => regex.test(lower));
   };
 
   // Execute parsed actions via Electron IPC
@@ -470,18 +525,25 @@ export default function ChatPage({ backend }: ChatPageProps) {
 
           if (ipcResult.success && ipcResult.message) {
             // Parse [ACTION:json] blocks and execute them
+            // SAFETY: Only execute actions if the user message is an action command
             let displayMessage = ipcResult.message;
             const { cleanText, actions } = parseActionFromResponse(displayMessage);
             if (actions.length > 0) {
               displayMessage = cleanText;
-              setAutomationStatus('Executing action...');
-              try {
-                await executeParsedActions(actions);
-                setAutomationStatus('Action completed ✅');
-              } catch {
-                setAutomationStatus('Action failed');
+              if (isActionCommand(messageText)) {
+                // User explicitly requested an action - execute it
+                setAutomationStatus('Executing action...');
+                try {
+                  await executeParsedActions(actions);
+                  setAutomationStatus('Action completed ✅');
+                } catch {
+                  setAutomationStatus('Action failed');
+                }
+                window.setTimeout(() => setAutomationStatus(automationConnected ? 'Automation Connected' : 'Automation Offline'), 3000);
+              } else {
+                // JARVIS generated actions on its own during casual conversation - BLOCK this
+                console.warn('[JARVIS] Blocked auto-generated actions during casual conversation:', actions);
               }
-              window.setTimeout(() => setAutomationStatus(automationConnected ? 'Automation Connected' : 'Automation Offline'), 3000);
             }
 
             const assistantMessage: StoredChatMessage = {
@@ -519,33 +581,42 @@ export default function ChatPage({ backend }: ChatPageProps) {
           });
 
       if (response.requiresLocalAction && response.localAction) {
-        // Execute local action directly via Electron IPC (most reliable)
-        try {
-          const electronResult = await (window as any).electronAPI?.desktopAction?.(response.localAction);
-          if (electronResult?.success) {
-            // Action executed successfully, modify message to confirm
-            response.message = response.message || 'Action executed!';
+        // SAFETY: Only execute local actions if user explicitly requested them
+        if (isActionCommand(messageText)) {
+          // Execute local action directly via Electron IPC (most reliable)
+          try {
+            const electronResult = await (window as any).electronAPI?.desktopAction?.(response.localAction);
+            if (electronResult?.success) {
+              // Action executed successfully, modify message to confirm
+              response.message = response.message || 'Action executed!';
+            }
+          } catch {
+            // Fallback: queue via API
+            await apiClient.queueLocalAction(storageService.getAppState().userId, response.localAction).catch(() => undefined);
           }
-        } catch {
-          // Fallback: queue via API
-          await apiClient.queueLocalAction(storageService.getAppState().userId, response.localAction).catch(() => undefined);
         }
       }
 
       // Parse [ACTION:json] blocks from AI response and execute them
+      // SAFETY: Only execute if user explicitly requested an action
       let displayMessage = response.message || 'No response returned.';
       const { cleanText, actions } = parseActionFromResponse(displayMessage);
       if (actions.length > 0) {
         displayMessage = cleanText;
-        // Execute all parsed actions via Electron IPC
-        setAutomationStatus('Executing action...');
-        try {
-          await executeParsedActions(actions);
-          setAutomationStatus('Action completed ✅');
-        } catch {
-          setAutomationStatus('Action failed');
+        if (isActionCommand(messageText)) {
+          // User explicitly requested an action - execute all parsed actions via Electron IPC
+          setAutomationStatus('Executing action...');
+          try {
+            await executeParsedActions(actions);
+            setAutomationStatus('Action completed ✅');
+          } catch {
+            setAutomationStatus('Action failed');
+          }
+          window.setTimeout(() => setAutomationStatus(automationConnected ? 'Automation Connected' : 'Automation Offline'), 3000);
+        } else {
+          // JARVIS generated actions on its own - BLOCK this
+          console.warn('[JARVIS] Blocked auto-generated actions during casual conversation:', actions);
         }
-        window.setTimeout(() => setAutomationStatus(automationConnected ? 'Automation Connected' : 'Automation Offline'), 3000);
       }
 
       const assistantMessage: StoredChatMessage = {
