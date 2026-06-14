@@ -185,6 +185,30 @@ export default function MessageInput({
     clearTimer(autoSendTimerRef);
     const clean = text.trim();
     if (!clean || selectedFileRef.current) return;
+
+    // SAFETY: Don't auto-send if transcription looks like noise/gibberish
+    // Common Whisper hallucinations on noise/silence:
+    const noisePatterns = [
+      /^موزیکو?$/i,           // Common Whisper Urdu hallucination
+      /^موسیقی?$/i,           // "music" - common false positive
+      /^شکریہ$/i,             // "thanks" - common false positive
+      /^SUBSCRIBE/i,          // Common Whisper hallucination
+      /^thanks for watching/i, // Common Whisper hallucination
+      /^you$/i,               // Too short
+      /^ہاں$/i,               // Too short "yes"
+      /^\W+$/,                // Only non-word characters
+      /^.{1,2}$/,             // Too short (1-2 chars)
+    ];
+
+    const isLikelyNoise = noisePatterns.some(pattern => pattern.test(clean));
+    if (isLikelyNoise) {
+      console.warn('[Voice] Blocked likely noise transcription:', clean);
+      setVoiceStatus('Could not understand — try again');
+      setMicState('ready');
+      window.setTimeout(() => setVoiceStatus(''), 2500);
+      return;
+    }
+
     autoSendTimerRef.current = window.setTimeout(() => {
       if (!manualListeningRef.current || isLoadingRef.current) return;
       handleSend(clean);
@@ -202,8 +226,8 @@ export default function MessageInput({
     setIsListening(manualListeningRef.current && !isLoadingRef.current);
     setMicState('processing');
 
-    if (audio.size < 500) {
-      showVoiceStatus('No voice detected');
+    if (audio.size < 2000) {
+      showVoiceStatus('No voice detected — speak longer');
       return;
     }
 
@@ -291,7 +315,7 @@ export default function MessageInput({
           silenceTimerRef.current = window.setTimeout(() => {
             if (recorder.state === 'recording') recorder.stop();
             audioContext.close().catch(() => undefined);
-          }, 1300);
+          }, 2500);
         }
 
         if (recorder.state === 'recording') {
