@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 export default function TerminalPage() {
   const [input, setInput] = useState('');
   const [output, setOutput] = useState<Array<{type: 'input' | 'output' | 'error' | 'info'; text: string}>>([
-    { type: 'info', text: 'JARVIS Terminal v13.1 — Type commands and press Enter' },
+    { type: 'info', text: 'JARVIS Terminal v3.1.1 — Type commands and press Enter' },
     { type: 'info', text: 'Supports: Windows CMD / PowerShell commands, Python, pip, etc.' },
   ]);
   const [history, setHistory] = useState<string[]>([]);
@@ -188,7 +188,7 @@ export default function TerminalPage() {
         </div>
         <div className="flex items-center justify-between mt-1.5">
           <span className="text-[10px] text-slate-600">↑↓ History • Ctrl+L Clear • Enter Execute</span>
-          <span className="text-[10px] text-slate-600">v13.1</span>
+          <span className="text-[10px] text-slate-600">v3.1.1</span>
         </div>
       </div>
     </div>
